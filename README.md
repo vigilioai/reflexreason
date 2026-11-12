@@ -1,8 +1,8 @@
 # Reflex and Reason 1.0
 
 An on-call triage system for a Kubernetes cluster. A decision model on CPU
-matches a fault to a runbook, a guarded MCP tool applies the fix, and a
-language model is consulted only when nothing known fits. The agents are
+matches a fault to a runbook, a guarded MCP tool applies the fix, and **a
+language model is consulted only when nothing known fits**. The agents are
 TypeScript. Three small Rust programs sit where measurements said they had
 to: a front door for alert bursts, a proxy in front of vLLM, and a helper
 that measures cold starts.
