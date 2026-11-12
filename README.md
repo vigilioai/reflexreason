@@ -7,6 +7,10 @@ TypeScript. Three small Rust programs sit where measurements said they had
 to: a front door for alert bursts, a proxy in front of vLLM, and a helper
 that measures cold starts.
 
+
+![Architecture is available in assets/architecture.png](assets/architecture.png)
+
+
 The full explanation, with every listing and every number, is
 `docs/reflex-reason-tutorial.html`.
 
