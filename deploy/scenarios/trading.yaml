@@ -1,0 +1,161 @@
+# A toy trading stack: three services, one shell script, one image. Every
+# fault in scripts/30-inject.sh is a single kubectl command against it.
+apiVersion: v1
+kind: Namespace
+metadata: {name: trading}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: svc, namespace: trading}
+data:
+  svc.sh: |
+    #!/bin/sh
+    # Behaviour comes from the environment, so a fault is one
+    # `kubectl set env` away.
+    [ -n "$BANNER" ] && echo "$BANNER"
+    [ -n "$FAIL_MSG" ] && { echo "$FAIL_MSG"; exit "${FAIL_CODE:-1}"; }
+    if [ "${CLOCK_SKEW_MS:-0}" -gt 500 ]; then
+      echo "E4417 clock skew vs exchange ${CLOCK_SKEW_MS}ms exceeds" \
+           "500ms tolerance, refusing to trade"
+      exit 3
+    fi
+    case "$ROLE" in
+    feed)
+      if [ -z "$FEED_URL" ]; then
+        echo "FATAL config: FEED_URL is empty"
+        exit 2
+      fi
+      touch /tmp/ready; i=0; gap=0
+      while true; do
+        if [ -f /tmp/stall ]; then
+          gap=$((gap+1))
+          echo "$(date +%T) WARN feed heartbeat gap" \
+               "${gap}000ms last_seq=$i"
+          sleep 1
+        else
+          i=$((i+1))
+          echo "$(date +%T) md tick seq=$i sym=TXF" \
+               "px=$((17250 + i % 7))"
+          sleep 0.5
+        fi
+      done ;;
+    gateway)
+      touch /tmp/ready; i=0
+      while true; do
+        i=$((i+1))
+        echo "$(date +%T) order ack id=$i latency_us=$((300 + i % 90))"
+        sleep 1
+      done ;;
+    risk)
+      echo "risk engine loading positions book_mb=${BOOK_MB:-4}"
+      touch /tmp/ready
+      # Hold BOOK_MB megabytes for real, so that a book which outgrows the
+      # memory limit is killed by the kernel and not by a simulation.
+      exec awk -v n="${BOOK_MB:-4}" 'BEGIN {
+        s = sprintf("%1048576s", "")
+        for (i = 0; i < n; i++) a[i] = s i
+        print "risk engine ready"; fflush()
+        while (1) system("sleep 5")
+      }' ;;
+    esac
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: feed-handler
+  namespace: trading
+  labels: {app: feed-handler}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  selector: {matchLabels: {app: feed-handler}}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  template:
+    metadata: {labels: {app: feed-handler}}
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+      - name: feed
+        image: busybox:1.36
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "/opt/svc/svc.sh"]
+        env:
+        - {name: ROLE, value: feed}
+        - {name: FEED_URL, value: "tcp://exchange-sim:9100"}
+        readinessProbe:
+          exec: {command: ["cat", "/tmp/ready"]}
+          periodSeconds: 2
+        resources:
+          requests: {cpu: 10m, memory: 8Mi}
+          limits: {memory: 32Mi}
+        volumeMounts: [{name: svc, mountPath: /opt/svc}]
+      volumes: [{name: svc, configMap: {name: svc}}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-gateway
+  namespace: trading
+  labels: {app: order-gateway}
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  selector: {matchLabels: {app: order-gateway}}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  template:
+    metadata: {labels: {app: order-gateway}}
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+      - name: gw
+        image: busybox:1.36
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "/opt/svc/svc.sh"]
+        env:
+        - {name: ROLE, value: gateway}
+        readinessProbe:
+          exec: {command: ["cat", "/tmp/ready"]}
+          periodSeconds: 2
+        resources:
+          requests: {cpu: 10m, memory: 8Mi}
+          limits: {memory: 32Mi}
+        volumeMounts: [{name: svc, mountPath: /opt/svc}]
+      volumes: [{name: svc, configMap: {name: svc}}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: risk-engine
+  namespace: trading
+  labels: {app: risk-engine}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  selector: {matchLabels: {app: risk-engine}}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  template:
+    metadata: {labels: {app: risk-engine}}
+    spec:
+      terminationGracePeriodSeconds: 1
+      containers:
+      - name: risk
+        image: busybox:1.36
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "/opt/svc/svc.sh"]
+        env:
+        - {name: ROLE, value: risk}
+        - {name: BOOK_MB, value: "4"}
+        readinessProbe:
+          exec: {command: ["cat", "/tmp/ready"]}
+          periodSeconds: 2
+        resources:
+          requests: {cpu: 10m, memory: 8Mi}
+          limits: {memory: 24Mi}
+        volumeMounts: [{name: svc, mountPath: /opt/svc}]
+      volumes: [{name: svc, configMap: {name: svc}}]

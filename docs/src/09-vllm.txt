@@ -1,0 +1,176 @@
+## ch-vllm | vLLM for agent traffic
+
+### s-not-serverless | Why the language model is not serverless
+
+A function platform earns its keep when instances start fast and hold nothing. A language model server is the opposite on both counts. Starting one means reading gigabytes of weights and placing them on a GPU, and the instance that results holds something valuable: the [[kv-cache|cache]] of computation for prompts it has already seen. An instance that scales to zero pays the load again and returns with that cache empty.
+
+No GPU was available for this tutorial, so there is no measured load time for [[vllm|vLLM]] here. The nearest measured fact is the decision model in ((s-cpu-only)): a model one tenth the size, on CPU, needed {{R.vonw.first_decision_ms / 1000|.0f}} s to give its first answer with warm disks and {{R.von.first_decision_ms / 1000|.0f}} s with cold ones. The manifest in ((s-vllm-flags)) gives the vLLM pod fifteen minutes to read its weights and place them on the GPU. A request cannot wait for any of that. So the model is one long-running pod, and the engineering goes into making each request to it as cheap as possible.
+
+### s-agent-traffic | What an agent sends
+
+An agent loop is a strange client. On every turn it sends the whole conversation again: the system instruction, the definitions of every tool, every earlier message and tool result, and then one new item at the end. Turn seven's prompt is turn six's prompt plus a few hundred bytes.
+
+That shape is an opportunity. Inside a transformer, the work done for a token depends only on the tokens before it. If two prompts begin with the same tokens, the intermediate results for that shared beginning are the same, and a server that kept them can skip straight to the first token that differs. vLLM does this across requests and calls it [[prefix-caching|automatic prefix caching]]. For an agent, whose every prompt extends the previous one, nearly all of the prompt can be skipped on every turn.
+
+The condition is strict. The prefix must be identical from the very first token. A difference at position 40 makes everything after position 40 new work, however similar the rest looks.
+
+### s-prefix | Three clients, measured
+
+How much of each prompt repeats the one before depends on the client, and the gateway in this chapter counts it. For each conversation it compares the bytes of each prompt with the bytes of the previous prompt in the same session and reports the shared leading fraction, once for the request as the client sent it and once after putting it into a canonical form. The benchmark plays three twelve-turn sessions with eight tools.
+
+@py
+rows = [(esc(p.session), f"{p.shared_as_sent_pct:.1f} %", f"{p.shared_canonical_pct:.1f} %") for p in R.gate.prefix]
+emit(table(["Client", "Shared prefix, as sent", "Shared prefix, canonical form"], rows, num=(1, 2),
+           caption="Share of prompt bytes that repeat the previous turn of the same session, over 12 turns. Measured by scripts/60-bench.sh gate."))
+@end
+
+The first client is well behaved and {{R.gate.prefix[0].shared_as_sent_pct}} % of what it sends is repetition that a prefix cache can skip.
+
+The second client sends the same content, but it lists its tools in a different order on each turn and serialises its JSON objects with keys in varying order. As sent, {{R.gate.prefix[1].shared_as_sent_pct}} % of each prompt matches the previous one: the tool definitions sit at the start of the prompt, so a reordering there invalidates everything after it. Nothing about that client is exotic. Tool lists assembled from a hash map, or from several MCP servers in the order they happened to answer, come out in a different order from run to run. After canonicalisation the figure is back to {{R.gate.prefix[1].shared_canonical_pct}} %.
+
+The third client puts the current time into its system prompt, a habit copied from chat applications. Half of each prompt is lost, {{R.gate.prefix[2].shared_as_sent_pct}} % remains, and canonicalisation cannot help ({{R.gate.prefix[2].shared_canonical_pct}} %), because the content itself changed. This one has to be fixed in the client, which is why the reason agent's instruction in ((s-reason-role)) contains nothing that varies.
+
+These percentages are bytes of the request, counted at the gateway. They show what a prefix cache is offered, not what vLLM's cache then does with it. The second measurement needs a GPU; <code>scripts/63-bench-vllm-prefix.sh</code> plays the shuffling client directly and through the gateway and reads vLLM's own <code>prefix_cache_queries</code> and <code>prefix_cache_hits</code> counters. It is listed in ((s-not-run)).
+
+### s-gate | The gateway
+
+vllm-gate is a proxy that sits in the same pod as vLLM, and the pod's Service exposes only the proxy. It does four things to every chat request, in this order: put it into canonical form, answer it from a cache if that is safe, join it to an identical request already in progress, and otherwise admit it to vLLM under a concurrency limit.
+
+@code rust/crates/vllm-gate/src/main.rs :: fn canonicalize(v: &mut Value) :: ^}
+
+<dl class="walk">
+<dt><code>tools.sort_by(|a, b| tool_name(a).cmp(tool_name(b)));</code></dt>
+<dd>The tool list is an array, and arrays are ordered, so two clients can describe the same tools in different orders. Sorting by name gives every request the same order. Tool order carries no meaning to the model, so nothing is lost.</dd>
+<dt><code>v.sort_all_objects();</code></dt>
+<dd>Sorts the keys of every JSON object in the request, recursively. This relies on a compile-time choice: the <code>serde_json</code> crate is built with its <code>preserve_order</code> feature, which makes objects remember their key order, so that sorting them is possible and the sorted order survives serialisation.</dd>
+</dl>
+
+The messages array is not touched. Its order is the conversation.
+
+@code rust/crates/vllm-gate/src/main.rs :: fn cacheable(v: &Value) :: ^}
+
+A reply may be reused only if the request would produce the same reply again. That is true for temperature 0 without streaming, and for nothing else. Everything else is passed through, still canonicalised and still under the admission limit.
+
+@code rust/crates/vllm-gate/src/main.rs :: let session = session_key(&headers, &v); :: return respond\(&hit, "hit", &prefix\); +1
+
+<dl class="walk">
+<dt><code>let raw_prompt = prompt_bytes(&amp;v); canonicalize(&amp;mut v);</code></dt>
+<dd>The prompt is captured once before and once after canonicalisation. <code>track_prefix</code> compares both with the previous turn of the session, which is where the table above comes from.</dd>
+<dt><code>let canonical = serde_json::to_vec(&amp;v)</code></dt>
+<dd>The canonical request as bytes. These bytes are what vLLM receives, and they are also what the cache key is computed from.</dd>
+<dt><code>let key = g.keys.hash_one((&amp;canonical, credential));</code></dt>
+<dd>The cache key covers the request and the caller's <code>Authorization</code> header, so a reply is never handed to a caller with a different credential. The hash is SipHash with a key drawn when the process starts. The fingerprint in ((s-sift)) needed a hash that is the same in every process and used FNV for it. A cache needs the opposite property: an attacker who can send requests must not be able to construct two that collide, and an unpredictable key provides that.</dd>
+<dt><code>if let Some(hit) = g.cache_get(key) { ... return respond(&amp;hit, "hit", &amp;prefix); }</code></dt>
+<dd>An entry younger than sixty seconds is returned at once. The response carries a header <code>x-gate: hit</code>, so a caller can always tell where an answer came from.</dd>
+</dl>
+
+@code rust/crates/vllm-gate/src/main.rs :: let (mut flight, leader) = { :: ^    };$
+
+<dl class="walk">
+<dt><code>let mut inflight = g.inflight.lock().unwrap();</code></dt>
+<dd>A map from cache key to requests that are in progress right now. The lock is held only for the few lines of the lookup, never across the call to vLLM.</dd>
+<dt><code>Some(rx) =&gt; (rx.clone(), false)</code></dt>
+<dd>Someone is already asking this exact question. This caller takes a copy of the receiving end of that request's channel and becomes a follower.</dd>
+<dt><code>let (tx, rx) = watch::channel(None);</code></dt>
+<dd>Nobody is asking, so this caller becomes the leader. A <code>watch</code> channel holds one value that any number of receivers can read, and it remembers the value for receivers that look later. A one-shot channel would deliver to a single follower only.</dd>
+<dt><code>tokio::spawn(async move { ... })</code></dt>
+<dd>The call to vLLM runs as a task of its own, not inside the leader's request. If the leader's client disconnects, its request handler is dropped, and with the call inside it every follower would be dropped too. As a separate task the call finishes regardless and the followers get their answer.</dd>
+<dt><code>if reply.status.is_success() { gate.cache_put(key, reply.clone()); }</code></dt>
+<dd>Only successful replies are cached. An error from vLLM is delivered to everyone who was waiting and then forgotten.</dd>
+<dt><code>gate.inflight.lock().unwrap().remove(&amp;key); let _ = tx.send(Some(reply));</code></dt>
+<dd>The entry is removed before the reply is published. A request that arrives after this point finds no flight, and finds the cache instead.</dd>
+</dl>
+
+This pattern is called [[single-flight|single flight]]. Its use here is the alert storm. One bad release breaks forty pods the same way, forty incidents reach the reason agent, and forty identical questions arrive within a second. One of them should reach the GPU.
+
+@py
+c, k = R.gate.coalesce, R.gate.cache
+emit(table(["Experiment", "Result"], [
+ (f"{c.identical_requests} identical requests at once, model reply delayed",
+  f"{c.upstream_calls} call reached the model; {c.coalesced} requests waited for it and {c.hit} arrived after it finished and were answered from the cache"),
+ (f"{k.requests} requests over {k.distinct_prompts} distinct prompts, one after another",
+  f"{k.upstream_calls} calls reached the model, {k.hits} were answered from the cache"),
+], caption="Measured against a stand-in model by scripts/60-bench.sh gate."))
+@end
+
+The fourth job, admission, is a semaphore inside <code>call_upstream</code> with eight permits. vLLM is started with <code>--max-num-seqs=8</code>, the same number. Requests beyond eight wait in the gateway, where the wait is counted in a metric, and not inside vLLM, where it would be invisible and would compete for GPU memory.
+
+### s-nagle | Sixteen milliseconds that were not the gateway's
+
+A proxy on the path of every request has to cost almost nothing. The first measurement said it cost a great deal.
+
+@py
+b, a = R.gate0.overhead, R.gate.overhead
+rows = []
+for x, y in zip(b, a):
+    rows.append((esc(x.case), f"{x.gate_internal_us:.1f} µs", f"{x.added_p50_ms:.2f} ms", f"{y.added_p50_ms:.2f} ms"))
+emit(table(["Request", "Gateway's own work", "Added latency, first build", "Added latency, after the fix"], rows, num=(1, 2, 3),
+           caption="Median latency through the gateway minus median latency direct, 400 requests each, against a stand-in model on the same machine."))
+emit(hbar([(f"first build: {b[0].case}", b[0].added_p50_ms, 2),
+           (f"first build: {b[1].case}", b[1].added_p50_ms, 2),
+           (f"with TCP_NODELAY: {a[0].case}", a[0].added_p50_ms, 0),
+           (f"with TCP_NODELAY: {a[1].case}", a[1].added_p50_ms, 0)],
+          "ms", "{:.2f}",
+          claim="Latency added by the gateway at the median, before and after one socket option."))
+@end
+
+The gateway's own counter said it spent {{R.gate0.overhead[0].gate_internal_us|.0f}} microseconds on a small request. The benchmark said requests through it took {{R.gate0.overhead[0].added_p50_ms|.0f}} milliseconds longer. A gap of nearly three orders of magnitude between work done and time lost means the time is being lost while nobody works: something is waiting.
+
+The waiting was in TCP. The HTTP client wrote a request as two small pieces, headers and then body. [[nagle|Nagle's algorithm]], on by default, holds back a small piece while an earlier one is unacknowledged, to avoid flooding a network with tiny packets. The receiving side, for a related reason, delays its acknowledgements for a few tens of milliseconds, hoping to send them along with a reply. Each side waited politely for the other. Nothing was wrong with either rule, and together they cost every request a timer.
+
+@code rust/crates/vllm-gate/src/main.rs :: http: reqwest::Client::builder() :: \.expect\("http client"\),
+
+@code rust/crates/vllm-gate/src/main.rs :: let listener = tokio::net::TcpListener::bind :: ^        \}\);$
+
+<dl class="walk">
+<dt><code>.tcp_nodelay(true)</code></dt>
+<dd>Disables Nagle's algorithm on connections from the gateway to vLLM. Small writes are sent at once.</dd>
+<dt><code>.tap_io(|tcp| { let _ = tcp.set_nodelay(true); })</code></dt>
+<dd>The same for the other side: every connection the gateway accepts from an agent. A proxy is a client and a server, and the delay can arise on either leg.</dd>
+</dl>
+
+After the change the added latency is {{R.gate.overhead[0].added_p50_ms|.2f}} ms for the small request and {{R.gate.overhead[1].added_p50_ms|.2f}} ms for an agent-sized one with eight tools, where the gateway's own work, mostly parsing and sorting JSON, is {{R.gate.overhead[1].gate_internal_us|.0f}} µs. The process uses {{R.gaterss.gate_rss_mb_after_bench}} MB of memory after the benchmark and is ready {{cs("service: vllm-gate (Rust), bind and exit").p50_ms|.1f}} ms after it is started.
+
+How to recognise this next time: a latency penalty of some tens of milliseconds that does not grow with the size of the payload, in a component whose own timing says it is fast. And how it was caught at all: the gateway measured its own work separately from the benchmark's end-to-end time. With only one of the two numbers the conclusion would have been either "the gateway is fast" or "Rust was the wrong choice", and both would have been wrong.
+
+A proxy with these four functions could be written in TypeScript. None was built, so there is no number to compare, and the case for Rust rests on what was measured: tens of microseconds of work per request, {{R.gaterss.gate_rss_mb_after_bench}} MB of memory in a sidecar, and a start in {{cs("service: vllm-gate (Rust), bind and exit").p50_ms|.1f}} ms.
+
+### s-vllm-flags | The vLLM pod
+
+@code deploy/k8s/20-llm.yaml :: - name: vllm :: VLLM_USE_RUST_FRONTEND
+
+<dl class="walk">
+<dt><code>Qwen/Qwen3.5-4B</code> with <code>--trust-remote-code</code>, <code>--enable-auto-tool-choice</code>, <code>--tool-call-parser=qwen3_coder</code>, <code>--reasoning-parser=qwen3</code></dt>
+<dd>The model and the flags that vLLM's published recipe for it prescribes. The two parser flags matter to an agent: without the tool-call parser the model's tool requests come back as text inside the message and the agent loop never sees a call.</dd>
+<dt><code>--max-model-len=16384</code></dt>
+<dd>The recipe asks for a 16 GB GPU to serve the model's full context window. On a 12 GB card the context is capped so that the cache for in-flight requests fits beside the weights. An incident conversation with a skill, five tool schemas and a few log tails is a few thousand tokens, so the cap costs nothing here.</dd>
+<dt><code>--gpu-memory-utilization=0.92</code> and <code>--max-num-seqs=8</code></dt>
+<dd>How much of the card vLLM may take, and how many requests it processes at once. The second number is the gateway's admission limit.</dd>
+<dt><code>--default-chat-template-kwargs={"enable_thinking": false}</code></dt>
+<dd>Turns off the model's thinking phase by default. A triage summary does not need it and every thinking token is latency. The argument is quoted in the YAML because an unquoted value that starts with a brace is parsed as a mapping, not a string; the first version of this manifest failed validation for exactly that reason.</dd>
+<dt><code>VLLM_USE_RUST_FRONTEND=1</code></dt>
+<dd>Set by the same recipe, which does not explain it. By its name it selects a Rust implementation of vLLM's request front end. It is here because the recipe was written and tested with it.</dd>
+</dl>
+
+Every line of that listing is a transcription of documentation and a calculation, not an observation. Whether this model with a 16,384 token context and eight sequences fits in 12 GB, and how fast it answers, has to be measured on the card. The manifest was validated against a live API server with a server-side dry run, which proves that Kubernetes accepts it and nothing more.
+
+### s-quiz-vllm | Check
+
+@quiz
+? A client reorders its tool definitions on every turn. Why does that cost so much prefix reuse?
+- Sorting tools is slow :: Sorting eight tools takes microseconds. The cost is not in the sorting.
++ Tool definitions are near the start of the prompt, and a prefix cache can only reuse what is identical from the first token on :: A change near the start leaves almost nothing in front of it to reuse. In the measurement the shared part fell from {{R.gate.prefix[0].shared_as_sent_pct}} % to {{R.gate.prefix[1].shared_as_sent_pct}} %.
+- vLLM rejects prompts whose tools are out of order :: It accepts any order; it simply has to recompute.
+? The call to the model runs in a spawned task, not in the request handler of the first caller. What would break otherwise?
+- The reply could not be cached :: Caching does not depend on which task makes the call.
++ If the first caller disconnected, its handler would be dropped together with the call, and every caller waiting on it would fail :: The followers' fate must not depend on the patience of a stranger who happened to ask first.
+- Two callers could become leader at once :: The lock around the map lookup prevents that either way.
+? The first benchmark showed {{R.gate0.overhead[0].added_p50_ms|.0f}} ms of added latency and {{R.gate0.overhead[0].gate_internal_us|.0f}} µs of internal work. What does that combination point to?
+- Slow JSON parsing :: Parsing is part of the internal work, which was microseconds.
+- A slow hash function :: Hashing is also part of the internal work.
++ Time spent waiting, not working: here, Nagle's algorithm on one side and delayed acknowledgements on the other :: A large gap between measured work and observed delay means a timer or a queue. The size, tens of milliseconds and independent of payload, points at TCP.
+? Why does the cache key include the caller's Authorization header?
++ So that a cached reply is only returned to a caller with the same credential as the one whose request produced it :: Without it, anyone who could reach the gateway could read answers to requests they were not authorised to make, by repeating them.
+- Because vLLM requires it :: vLLM knows nothing about the gateway's cache.
+- To make the hash longer :: The key is 64 bits either way.
+@end

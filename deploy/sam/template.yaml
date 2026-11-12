@@ -1,0 +1,49 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Serverless front door for the reflex swarm. The same intake function is
+  packaged twice, as a static Rust binary and as a Node.js bundle, so their
+  cold starts can be compared on identical events. build.sh fills
+  dist/lambda; no `sam build` step is needed.
+
+Globals:
+  Function:
+    Timeout: 10
+    MemorySize: 256
+    Architectures: [x86_64]
+
+Resources:
+  # provided.al2023 runs any executable named `bootstrap`. The binary is
+  # static (musl), so it does not depend on the runtime's glibc.
+  IntakeRust:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../../dist/lambda/intake-rust/
+      Handler: bootstrap
+      Runtime: provided.al2023
+      Events:
+        Alerts:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt AlertQueue.Arn
+            BatchSize: 10
+            # Caps how many copies run at once, which caps the load on the
+            # services behind it during an alert storm.
+            ScalingConfig: {MaximumConcurrency: 50}
+
+  IntakeTs:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../../dist/lambda/intake-ts/
+      Handler: intake-lambda.handler
+      Runtime: nodejs22.x
+
+  AlertQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 60
+
+Outputs:
+  IntakeRustName: {Value: !Ref IntakeRust}
+  IntakeTsName: {Value: !Ref IntakeTs}
+  AlertQueueUrl: {Value: !Ref AlertQueue}

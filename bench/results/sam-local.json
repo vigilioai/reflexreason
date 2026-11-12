@@ -1,0 +1,162 @@
+{
+ "IntakeRust": {
+  "runs": 10,
+  "all_ok": true,
+  "init_ms_p50": 0.08,
+  "duration_ms_p50": 2.32,
+  "max_memory_mb_p50": 256.0,
+  "container_wall_ms_p50": 3994.5,
+  "rows": [
+   {
+    "wall_ms": 4139,
+    "init_ms": 0.07,
+    "duration_ms": 2.21,
+    "max_memory_mb": 256.0,
+    "ok": true
+   },
+   {
+    "wall_ms": 4235,
+    "init_ms": 0.05,
+    "duration_ms": 2.12,
+    "max_memory_mb": 256.0,
+    "ok": true
+   },
+   {
+    "wall_ms": 3888,
+    "init_ms": 0.08,
+    "duration_ms": 2.02,
+    "max_memory_mb": 256.0,
+    "ok": true
+   },
+   {
+    "wall_ms": 4426,
+    "init_ms": 0.1,
+    "duration_ms": 2.32,
+    "max_memory_mb": 256.0,
+    "ok": true
+   },
+   {
+    "wall_ms": 3730,
+    "init_ms": 0.16,
+    "duration_ms": 3.2,
+    "max_memory_mb": 256.0,
+    "ok": true
+   },
+   {
+    "wall_ms": 3705,
+    "init_ms": 0.08,
+    "duration_ms": 2.54,
+    "max_memory_mb": 256.0,
+    "ok": true
+   },
+   {
+    "wall_ms": 3971,
+    "init_ms": 0.07,
+    "duration_ms": 2.25,
+    "max_memory_mb": 256.0,
+    "ok": true
+   },
+   {
+    "wall_ms": 4573,
+    "init_ms": null,
+    "duration_ms": null,
+    "max_memory_mb": null,
+    "ok": true
+   },
+   {
+    "wall_ms": 4018,
+    "init_ms": 0.07,
+    "duration_ms": 2.36,
+    "max_memory_mb": 256.0,
+    "ok": true
+   },
+   {
+    "wall_ms": 3889,
+    "init_ms": 0.09,
+    "duration_ms": 3.06,
+    "max_memory_mb": 256.0,
+    "ok": true
+   }
+  ]
+ },
+ "IntakeTs": {
+  "runs": 10,
+  "all_ok": true,
+  "init_ms_p50": 0.05,
+  "duration_ms_p50": 78.245,
+  "max_memory_mb_p50": 256.0,
+  "container_wall_ms_p50": 3991.5,
+  "rows": [
+   {
+    "wall_ms": 4015,
+    "init_ms": 0.04,
+    "duration_ms": 68.98,
+    "max_memory_mb": 256.0,
+    "ok": true
+   },
+   {
+    "wall_ms": 3992,
+    "init_ms": 0.06,
+    "duration_ms": 92.8,
+    "max_memory_mb": 256.0,
+    "ok": true
+   },
+   {
+    "wall_ms": 4139,
+    "init_ms": 0.04,
+    "duration_ms": 69.71,
+    "max_memory_mb": 256.0,
+    "ok": true
+   },
+   {
+    "wall_ms": 3984,
+    "init_ms": 0.04,
+    "duration_ms": 69.24,
+    "max_memory_mb": 256.0,
+    "ok": true
+   },
+   {
+    "wall_ms": 3816,
+    "init_ms": 0.08,
+    "duration_ms": 86.78,
+    "max_memory_mb": 256.0,
+    "ok": true
+   },
+   {
+    "wall_ms": 3933,
+    "init_ms": 0.05,
+    "duration_ms": 89.2,
+    "max_memory_mb": 256.0,
+    "ok": true
+   },
+   {
+    "wall_ms": 4081,
+    "init_ms": 0.06,
+    "duration_ms": 92.64,
+    "max_memory_mb": 256.0,
+    "ok": true
+   },
+   {
+    "wall_ms": 4192,
+    "init_ms": 0.03,
+    "duration_ms": 64.91,
+    "max_memory_mb": 256.0,
+    "ok": true
+   },
+   {
+    "wall_ms": 3991,
+    "init_ms": 0.06,
+    "duration_ms": 102.86,
+    "max_memory_mb": 256.0,
+    "ok": true
+   },
+   {
+    "wall_ms": 3740,
+    "init_ms": 0.05,
+    "duration_ms": 67.49,
+    "max_memory_mb": 256.0,
+    "ok": true
+   }
+  ]
+ }
+}

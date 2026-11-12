@@ -1,0 +1,166 @@
+## ch-goal | The first two seconds
+
+### s-goal | What has to be true after a pod dies
+
+At 03:10 a release removes one setting from the feed handler. The process starts, finds no feed address, prints one line and exits. Kubernetes restarts it, it exits again, and the pause between restarts starts doubling. Nothing is wrong with the cluster and nothing is mysterious: the fix is to return the deployment to the revision that worked. A person needs minutes to get there, and the minutes go into waking up, authenticating and reading, not into deciding.
+
+The system in this tutorial was designed backward from that moment. Stated as four conditions on the end state, a few seconds after the first failed start: the previous revision is running again; something has checked that it stayed up; there is a record of what was seen, what was decided, how sure the decision was and what was changed; and, had the fault been one that nobody wrote a procedure for, nothing would have been changed at all and a person would be reading a diagnosis instead.
+
+Here is that record for exactly this fault, as the system wrote it during the measured run on a real cluster. The <code>ms</code> field is the time spent in each step.
+
+@py
+import json
+r = rec("crash-config")
+keep = ["fingerprint", "workload", "reason", "faultClass", "classProbability",
+        "injectionProbability", "action", "executed", "recovered", "why"]
+lines = ["{"] + [f' "{k}": {json.dumps(r[k])},' for k in keep]
+ms = list(r.ms.items())
+half = (len(ms) + 1) // 2
+row = lambda items: ", ".join(f'"{k}": {v}' for k, v in items)
+lines.append(' "ms": {' + row(ms[:half]) + ",")
+lines.append("        " + row(ms[half:]) + "}")
+lines.append("}")
+assert all(len(l) <= 76 for l in lines)
+emit('<pre class="code plain"><code>' + esc("\n".join(lines)) + "</code></pre>")
+@end
+
+Each of the four conditions forces one part of the design. To change a cluster with nobody watching, the change has to be one of a few named actions with hard limits that no input can widen, so there is a policy table and a guarded door (((ch-door))). To choose among a few actions the system needs a class with a probability attached, not a paragraph of prose, so the fast path asks a decision model and reads numbers (((ch-reflex))). The class is only as good as the evidence, and a raw log tail is mostly repetition, so the log is distilled before anything reads it (((s-sift))). Procedures have to live where a person can edit them, so the classes are [[runbook|runbooks]] in Markdown and a retrieval pipeline finds the candidates (((ch-rag))). And because some faults match nothing, there is a slower path that can read and reason but is not allowed to act (((ch-reason))).
+
+In the record above, <code>decide</code> is {{rec("crash-config").ms.decide}} ms and <code>verify</code> is {{rec("crash-config").ms.verify}} ms. Observation, distillation and the write itself add up to {{rec("crash-config").ms.observe + rec("crash-config").ms.distill + rec("crash-config").ms.act}} ms. The time goes to two places only: the decision model, on two shared virtual CPUs, and waiting for Kubernetes to prove that the new pods are healthy. Both are examined later, with numbers, in ((s-latency)) and ((s-verify)).
+
+### s-two-speeds | Two speeds, and why the fast one is not a language model
+
+The naming comes from psychology. [[kahneman|Daniel Kahneman]] made the split between a fast, automatic System 1 and a slow, deliberate System 2 widely known. In 2026 the label was borrowed for a class of model: [[jev|Jev]] takes application state plus structured questions and returns typed decisions (a choice among options, a score, a yes or no with a probability) without generating any text. The open projects that followed it serve the same request format, a POST to <code>/v1/systemone</code>. This tutorial uses [[von|Von 1.3]], a 395 million parameter [[modernbert|ModernBERT]] encoder with a scoring head, because it runs on a CPU.
+
+There are three reasons not to let the language model do everything, and each of them returns later as a measurement or as an incident.
+
+Latency has a different shape. A language model writes its answer one token at a time, so answer time grows with answer length, and an agent that must call three tools makes four round trips to the model. An encoder reads the state and the question once and emits one number per option. On the test machine one multiple-choice question takes {{R.von.one_choice_question.p50_ms}} ms at the median, with stock PyTorch on two shared vCPUs. The model card reports 0.096 s on four vCPUs with OpenVINO; that configuration was not reproduced here.
+
+The output needs no parsing. A probability can be compared with a threshold. A paragraph has to be interpreted, and the interpretation is one more place where the system can be wrong.
+
+A model that cannot write cannot be talked into writing a command. Log text is input that an attacker controls: whoever can make a service print a line can address the agent. That attack has a name, [[prompt-injection|prompt injection]], and a decision model does not make it impossible, because the model can still be pushed toward the wrong option. What changes is the size of the damage, which is bounded by the option list. ((s-guard)) measures how well that holds.
+
+The price is that a decision model does not explain itself, and, as Von's own model card says, it can be confidently wrong on inputs unlike its training data. So the fast path never acts on a low probability, and whatever it declines goes to the slow path or to a person. The two paths are called reflex and reason in the code.
+
+### s-architecture | The architecture, derived
+
+<figure class="diagram"><svg viewBox="0 0 720 376" role="img" aria-label="Nine components in three columns: the cluster side, the agents, and the models, with the calls between them." font-family="ui-sans-serif, system-ui, Helvetica, Arial, sans-serif">
+<defs><marker id="d1arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+<g stroke="currentColor" stroke-width="1.2">
+<rect x="20" y="22" width="190" height="62" rx="6" fill="#dfeaf6"/>
+<rect x="20" y="152" width="190" height="62" rx="6" fill="#efe9db"/>
+<rect x="20" y="282" width="190" height="62" rx="6" fill="#efe9db"/>
+<rect x="265" y="22" width="190" height="62" rx="6" fill="#dfeaf6"/>
+<rect x="265" y="152" width="190" height="62" rx="6" fill="#fbe6da"/>
+<rect x="265" y="282" width="190" height="62" rx="6" fill="#fbe6da"/>
+<rect x="510" y="22" width="190" height="62" rx="6" fill="#dfeaf6"/>
+<rect x="510" y="152" width="190" height="62" rx="6" fill="#dfeaf6"/>
+<rect x="510" y="282" width="190" height="62" rx="6" fill="#fbe6da"/>
+</g>
+<g fill="none" stroke="currentColor" stroke-width="1.4" marker-end="url(#d1arr)">
+<path d="M265 42H213"/>
+<path d="M115 84V150"/>
+<path d="M115 214V280"/>
+<path d="M455 42H507"/>
+<path d="M605 84V150"/>
+<path d="M455 68H482V170H507"/>
+<path d="M360 84V150"/>
+<path d="M265 172H238V64H213"/>
+<path d="M455 194H507"/>
+<path d="M360 214V280"/>
+<path d="M455 313H507"/>
+</g>
+<g fill="currentColor" font-size="13" font-weight="700" text-anchor="middle">
+<text x="115" y="45">kube-ops</text>
+<text x="115" y="175">Kubernetes API</text>
+<text x="115" y="305">trading namespace</text>
+<text x="360" y="45">reflex swarm</text>
+<text x="360" y="175">reason agent</text>
+<text x="360" y="305">vllm-gate</text>
+<text x="605" y="45">retrieval agent</text>
+<text x="605" y="175">decision model</text>
+<text x="605" y="305">vLLM</text>
+</g>
+<g fill="currentColor" font-size="10.5" text-anchor="middle">
+<text x="115" y="61">MCP server, holds the only</text><text x="115" y="74">cluster credential</text>
+<text x="115" y="191">RBAC: read, patch deployments,</text><text x="115" y="204">no delete</text>
+<text x="115" y="321">feed-handler, order-gateway,</text><text x="115" y="334">risk-engine</text>
+<text x="360" y="61">TypeScript, one async task</text><text x="360" y="74">per incident</text>
+<text x="360" y="191">Google ADK, a skill,</text><text x="360" y="204">read-only tools</text>
+<text x="360" y="321">Rust: canonical JSON, cache,</text><text x="360" y="334">single flight</text>
+<text x="605" y="61">LangGraph: retrieve, grade,</text><text x="605" y="74">compose</text>
+<text x="605" y="191">Von 1.3 on CPU: probabilities,</text><text x="605" y="204">never text</text>
+<text x="605" y="321">Qwen3.5-4B on the GPU,</text><text x="605" y="334">long-running</text>
+</g>
+<g fill="currentColor" font-size="10.5">
+<text x="239" y="36" text-anchor="middle">MCP</text>
+<text x="107" y="121" text-anchor="end">get, patch</text>
+<text x="107" y="251" text-anchor="end">rolling update</text>
+<text x="481" y="36" text-anchor="middle">A2A</text>
+<text x="613" y="121">which runbook?</text>
+<text x="488" y="121">guard</text>
+<text x="368" y="121">A2A, if unsure</text>
+<text x="232" y="121" text-anchor="end">read only</text>
+<text x="481" y="208" text-anchor="middle">guard</text>
+<text x="368" y="251">chat completions</text>
+</g>
+</svg><figcaption>Blue boxes are the reflex path, which every incident takes. Orange boxes are the reason path, which runs only when the reflex path declines to act. The reason agent can also ask the retrieval agent for a near match over A2A; that call is left out of the drawing. Only kube-ops holds a Kubernetes credential.</figcaption></figure>
+
+Read the drawing from the top middle. The <b>reflex swarm</b> is one TypeScript process that starts one short-lived agent per incident. An agent never talks to Kubernetes. It calls tools on <b>kube-ops</b>, an [[mcp|MCP]] server that owns the only service account and refuses anything outside a short list. To find out which procedure applies, the agent sends the distilled evidence to the <b>retrieval agent</b> over [[a2a|A2A]]; that agent is a [[langgraph|LangGraph]] graph that retrieves candidate runbooks by vector search and asks the <b>decision model</b> which one, if any, matches. In parallel the reflex agent asks the same decision model whether the log text reads like an instruction, which is the guard against injected text.
+
+If the answer is a known runbook with enough probability, the agent calls one write tool, waits for the rollout and records the outcome. If not, it hands the incident to the <b>reason agent</b>, built with the Google [[adk|Agent Development Kit]]. That agent loads a [[skill|skill]], reads logs and rollout history through the same MCP server (which shows it no write tools at all), and asks a language model served by [[vllm|vLLM]] to write a diagnosis. Every request to the language model passes through <b>vllm-gate</b>, a small Rust proxy whose job is to make agent traffic cheap for vLLM.
+
+The technologies were given; the placement was the design work. The table shows where each one ended up and why there.
+
+@py
+rows = [
+ ("Decision model", "the reflex agent and the retrieval grader", "a choice with a probability is what a policy can check", "ch-reflex"),
+ ("Kubernetes", "the cluster under triage, and where the agents run", "rollouts, probes, RBAC and Leases are the primitives the fixes are made of", "ch-faults"),
+ ("MCP", "kube-ops, the one door to the cluster", "tools are the natural place for limits that no prompt can widen", "ch-door"),
+ ("RAG pipeline", "runbooks: ingest, chunk, embed, search", "procedures stay in Markdown that a person edits", "ch-rag"),
+ ("LangGraph", "the retrieve, grade, compose graph", "three steps with one branch is a graph, and it is testable as one", "ch-rag"),
+ ("A2A", "retrieval agent and reason agent are remote agents", "each can be scaled, replaced and secured on its own", "ch-rag"),
+ ("Google ADK", "the reason agent", "the open-ended path is where an agent framework earns its start-up cost", "ch-reason"),
+ ("Skills", "the triage procedure the reason agent loads", "a long procedure stays out of the prompt until it is needed", "ch-reason"),
+ ("vLLM", "the language model server, behind the Rust gateway", "agent traffic has a long shared prefix, which vLLM can reuse", "ch-vllm"),
+ ("Rust", "intake, gateway, measurement helper", "only where a measurement showed TypeScript could not do the job", "ch-rust"),
+ ("AWS SAM", "the serverless front door for alert storms", "the one stateless, bursty, start-up-sensitive component", "ch-swarm"),
+]
+emit(table(["Technology", "Where it is used", "Why there", "Read"],
+           [(a, b, c, inline(f"(({d}))")) for a, b, c, d in rows]))
+@end
+
+### s-trading | The same shape in a trading system
+
+The cluster under triage is a toy trading stack, because the faults that matter in trading are a good test of judgement. A dashboard that shows every pod Running and Ready says nothing about whether prices are still arriving. Three stand-in services cover the cases.
+
+@py
+emit(table(["Service", "Stands for", "Fault that matters", "Verdict"], [
+ ("feed-handler", "market data feed handler", "the feed stalls while the pod stays Ready", "restart is safe: the handler resubscribes"),
+ ("order-gateway", "order entry gateway, two replicas", "a release that cannot start, or clock skew against the exchange", "roll back the release; never act on clock skew"),
+ ("risk-engine", "pre-trade risk and position book", "the book outgrows its memory limit", "raise the limit once, to a ceiling, then page"),
+]))
+@end
+
+The verdict column is the part that carries over to a real desk. A stale feed is cheap to restart and expensive to leave. A clock that disagrees with the exchange is the opposite: restarting changes nothing, and trading through it is how wrong timestamps reach an exchange, so the only correct automatic action is to stop and page. A monitoring loop with automatic recovery already encodes such verdicts as rules. What the decision model adds is the step before the rule: turning an unstructured log line into the class that the rule is written for, with a number that says when not to trust it.
+
+### s-scope | What ran, and on what
+
+Everything in the reflex path ran for real: a k3s cluster, real faults, the real Von 1.3 weights on CPU, real rollbacks checked against the Kubernetes API. The reason path ran end to end too, with its ADK agent, skill, MCP tools and A2A call, but against a scripted stand-in for the language model, because the test machine has no GPU. The vLLM flags and the gateway's effect on vLLM's cache are therefore prepared and scripted, not measured. ((s-not-run)) lists each such gap with the command that closes it on a machine with an RTX 3060.
+
+### s-quiz-goal | Check
+
+@quiz
+? The measured record shows almost all of the handling time in two steps. Which two?
+- Reading pod logs and distilling them :: Observation and distillation together took a few tens of milliseconds in the record. They are not where the time goes.
++ The decision model and waiting for Kubernetes to confirm the rollout :: The decide step is model inference on two shared vCPUs, and the verify step is the time Kubernetes needs to start and ready the restored pods. Everything else is tens of milliseconds.
+- The MCP write call and the A2A round trip :: The write itself took a few tens of milliseconds. The A2A call contains the decision model's time, but the protocol overhead is not what makes it slow.
+? Why is the reflex path built on a decision model and not on a small language model?
+- A decision model is always more accurate than a language model :: Nothing in the measurements supports that, and the model card itself warns about confident errors on unfamiliar inputs.
++ Its output is a probability over a fixed option list, which a policy can check and which bounds what injected text can cause :: That is the property the design depends on: a number to compare with a threshold, and no ability to produce a command.
+- It removes the need for runbooks :: The opposite: the runbooks are the option list. The model only chooses among them or declines.
+? Clock skew against the exchange is detected with good confidence. What should the automation do?
+- Restart the gateway, since restarts are cheap :: A restart does not change the clock, and trading through skew is the outcome to prevent.
+- Roll back the last release :: The release did not cause the skew. A rollback would be an action with no relation to the fault.
++ Take no action and page a person, with the evidence :: Some classes are known precisely so that the system knows not to act on them. The runbook for this class says escalate.
+@end

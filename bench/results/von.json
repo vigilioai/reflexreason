@@ -1,0 +1,21 @@
+{
+ "model": "von-1.3 (ModernBERT-large, 395M parameters), CPU",
+ "vcpus": 2,
+ "process_to_health_s": 2.5,
+ "first_decision_ms": 156894,
+ "process_to_first_answer_s": 159.4,
+ "one_choice_question": {
+  "p50_ms": 432,
+  "min_ms": 339,
+  "max_ms": 546
+ },
+ "two_yes_no_questions": {
+  "p50_ms": 1706,
+  "min_ms": 1589,
+  "max_ms": 1904
+ },
+ "eight_choice_requests_four_callers_s": 3.5,
+ "sequential_equivalent_s": 3.46,
+ "rss_mb": 3262,
+ "note": "first start after boot: the 1.5 GB of weights were read from disk"
+}

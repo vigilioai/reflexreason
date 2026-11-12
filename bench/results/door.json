@@ -1,0 +1,111 @@
+{
+ "identity": "system:serviceaccount:oncall:kube-ops",
+ "rbac": [
+  {
+   "verb": "get",
+   "resource": "pods",
+   "namespace": "trading",
+   "allowed": "yes"
+  },
+  {
+   "verb": "get",
+   "resource": "pods/log",
+   "namespace": "trading",
+   "allowed": "yes"
+  },
+  {
+   "verb": "patch",
+   "resource": "deployments",
+   "namespace": "trading",
+   "allowed": "yes"
+  },
+  {
+   "verb": "delete",
+   "resource": "pods",
+   "namespace": "trading",
+   "allowed": "no"
+  },
+  {
+   "verb": "delete",
+   "resource": "deployments",
+   "namespace": "trading",
+   "allowed": "no"
+  },
+  {
+   "verb": "create",
+   "resource": "pods/exec",
+   "namespace": "trading",
+   "allowed": "no"
+  },
+  {
+   "verb": "get",
+   "resource": "secrets",
+   "namespace": "trading",
+   "allowed": "no"
+  },
+  {
+   "verb": "create",
+   "resource": "deployments",
+   "namespace": "trading",
+   "allowed": "no"
+  },
+  {
+   "verb": "patch",
+   "resource": "deployments",
+   "namespace": "oncall",
+   "allowed": "no"
+  },
+  {
+   "verb": "get",
+   "resource": "secrets",
+   "namespace": "oncall",
+   "allowed": "no"
+  },
+  {
+   "verb": "create",
+   "resource": "leases",
+   "namespace": "oncall",
+   "allowed": "yes"
+  },
+  {
+   "verb": "delete",
+   "resource": "namespaces",
+   "namespace": "trading",
+   "allowed": "no"
+  }
+ ],
+ "mcp": {
+  "token_configured": true,
+  "tools_without_token": [
+   "describe_incident",
+   "list_healthy",
+   "list_unhealthy",
+   "pod_logs",
+   "rollout_history",
+   "rollout_status"
+  ],
+  "tools_with_token": [
+   "acquire_lease",
+   "describe_incident",
+   "list_healthy",
+   "list_unhealthy",
+   "pod_logs",
+   "rollout_history",
+   "rollout_restart",
+   "rollout_status",
+   "rollout_undo",
+   "set_memory_limit"
+  ],
+  "rollout_undo_without_token": "refused: MCP error -32602: Tool rollout_undo not found",
+  "rollout_undo_wrong_namespace": "refused: namespace kube-system is not on the allowlist",
+  "memory_above_ceiling": "refused: 4096Mi is above the 256Mi ceiling",
+  "rollout_restart_dry_run_with_token": "ok: {\"ok\":true,\"dryRun\":true,\"result\":\"restarted feed-handler\"}"
+ },
+ "a2a": {
+  "token_configured": true,
+  "rag_without_token": 401,
+  "rag_with_token": 200,
+  "reason_without_token": 401,
+  "reason_agent_card_without_token": 200
+ }
+}

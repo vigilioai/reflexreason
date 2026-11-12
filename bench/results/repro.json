@@ -1,0 +1,5 @@
+{
+ "bundles": 14,
+ "identical": 14,
+ "how": "the package was extracted into an empty directory, built there with npm ci, and the SHA-256 of every bundle was compared with the bundles that the benchmarks had measured"
+}

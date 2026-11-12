@@ -1,0 +1,198 @@
+## ch-swarm | The swarm
+
+### s-swarm-what | What an agent is here, and why it is small
+
+In most writing about agent swarms, an agent is a language model with a prompt, a memory and a conversation, and a swarm is many of those talking to each other. Each one holds a context of thousands of tokens, and the cost of a swarm is the cost of its models.
+
+A reflex agent in this system is something much smaller: one call to an <code>async</code> function. It lives for a few seconds. Its entire memory is the evidence for one workload, a few kilobytes of JSON, and it holds no model. The models are servers that every agent shares. For nearly all of its short life an agent is waiting for a network reply, and waiting is what Node's event loop does cheaply: a waiting agent is a suspended function and a few buffers, not a thread and not a process.
+
+That is the design decision that makes the title of this chapter affordable. The agents are numerous and nearly free; the intelligence is central and shared. The measurements below put numbers on both halves, and the second half is the one that sets the limits.
+
+### s-dispatch | The dispatcher
+
+@code ts/src/swarm/dispatcher.ts :: export async function pool<T, R>( :: ^}
+
+<dl class="walk">
+<dt><code>let next = 0;</code> and <code>const i = next++;</code></dt>
+<dd>A shared cursor into the list of work. JavaScript runs one piece of code at a time, so two workers can never take the same index: the read and the increment happen without interruption. No lock is needed, which would not be true with threads.</dd>
+<dt><code>const worker = async () =&gt; { while (next &lt; items.length) { ... } }</code></dt>
+<dd>A worker takes the next item, waits for it to finish, and takes another. It stops when the list is exhausted.</dd>
+<dt><code>Array.from({ length: Math.min(limit, items.length) }, worker)</code></dt>
+<dd>Starts <code>limit</code> workers, or fewer if there is less work. The limit, 16 by default, is the number of incidents in flight at once. It exists to protect the decision server: a storm of two hundred incidents should become a queue here, where it costs nothing, and not two hundred simultaneous requests to a model on two cores.</dd>
+<dt><code>out[i] = await task(items[i] as T);</code></dt>
+<dd>Results are stored by index, so the output has the order of the input whatever order the tasks finish in.</dd>
+</dl>
+
+@code ts/src/swarm/dispatcher.ts :: export async function sweep( :: ^}
+
+<dl class="walk">
+<dt><code>const at = settled.get(`${t.workload}/${t.reason}`);</code></dt>
+<dd>An incident that was escalated is remembered for five minutes. The fault is still there on the next sweep, five seconds later, and without this memory the person on call would be paged every five seconds for the same thing.</dd>
+<dt><code>await tool(..."acquire_lease", { key, holder: HOLDER, ttl_sec: ... })</code></dt>
+<dd>Before touching a workload, the agent claims it. The holder name is host name plus process id, so every dispatcher process has its own identity.</dd>
+<dt><code>if (!lease.acquired) return null;</code></dt>
+<dd>Someone else has it. This agent ends without a record, which is the correct amount of work for it to do.</dd>
+<dt><code>if (!record.recovered) settled.set(...)</code></dt>
+<dd>Anything that did not end in a verified recovery is marked as settled: handed over, not to be retried by the automation.</dd>
+</dl>
+
+### s-lease | One agent per workload, across processes
+
+The manifest runs two dispatcher pods so that one can die. Both see every incident. Something has to make sure that a workload is not rolled back twice, and that something must be outside both processes. The cluster already contains a consistent store with exactly the needed primitive: a [[lease|Lease]] object, which Kubernetes itself uses for leader election.
+
+@code ts/src/kube/ops.ts :: export async function acquireLease( :: ^}
+
+<dl class="walk">
+<dt><code>const name = "rr-" + key.replace(/[^a-z0-9]+/g, "-");</code></dt>
+<dd>One Lease per workload. Kubernetes object names allow lower-case letters, digits and hyphens, so everything else in the key becomes a hyphen.</dd>
+<dt><code>const now = new Date().toISOString().replace(/\.\d+Z$/, ".000000Z");</code></dt>
+<dd>A detail that costs an hour the first time. The Lease fields <code>acquireTime</code> and <code>renewTime</code> have the type MicroTime, which the API server parses with exactly six fractional digits. JavaScript's <code>toISOString()</code> produces three. The request is rejected as malformed until the timestamp is rewritten.</dd>
+<dt><code>await kube("POST", base, { ... kind: "Lease", metadata: { name }, spec })</code></dt>
+<dd>Try to create the Lease. Creation is atomic in the API server: if two dispatchers send this request at the same instant, one gets 201 and the other gets 409 Conflict. That single guarantee is the whole mutual exclusion.</dd>
+<dt><code>if (!(e instanceof KubeError) || e.status !== 409) throw e;</code></dt>
+<dd>A conflict means the Lease exists, which is an expected answer. Any other error is a real failure and is passed on.</dd>
+<dt><code>const expired = age(lease.spec?.renewTime) &gt; (lease.spec?.leaseDurationSeconds ?? ttlSec);</code></dt>
+<dd>An existing Lease may be stale: its holder finished, or crashed. A Lease is never deleted by the agents, which have no delete permission. It simply expires, here after the verification timeout plus thirty seconds.</dd>
+<dt><code>if (!expired &amp;&amp; lease.spec?.holderIdentity !== holder) return { acquired: false, ... }</code></dt>
+<dd>A live Lease held by someone else: back off.</dd>
+<dt><code>await kube("PUT", `${base}/${name}`, { ...lease, spec });</code></dt>
+<dd>Take over an expired Lease, or renew one's own. The object that is sent back includes the <code>resourceVersion</code> that was read a moment ago. If another dispatcher took the Lease in between, the version no longer matches and the API server answers 409, which the last lines turn into "not acquired". This is [[optimistic-concurrency|optimistic concurrency]]: no lock is held while deciding, and the write fails if the world changed.</dd>
+</dl>
+
+### s-swarm-memory | What one more agent costs
+
+The benchmark answers one question: how much memory does the process need per agent in flight? It starts N reflex agents at once against stand-in backends that reply after a fixed 100 ms, so that all N are waiting at the same moment, and samples the process's memory every 10 ms. The agents are the real code, including MCP calls, the A2A round trip to the real retrieval agent, distillation and the policy. Only the cluster and the decision model are replaced, because the question is about the agents.
+
+@py
+s = R.swarm
+rows = [("idle, after warm-up", "", f"{s.idle_rss_mb:.1f}", f"{s.idle_heap_mb:.1f}", "", "")]
+for r in s.rows:
+    rows.append((f"{r.agents:,}", f"{r.wall_ms / 1000:.1f}", f"{r.rss_peak_mb:.1f}", f"{r.heap_peak_mb:.1f}",
+                 f"{r.heap_kb_per_agent:.0f}", f"{r.incidents_per_s:.1f}"))
+emit(table(["Agents in flight", "Wall s", "Peak RSS MB", "Peak heap MB", "Heap KB per agent", "Incidents per s"],
+           rows, num=(0, 1, 2, 3, 4, 5),
+           caption="One Node process (" + s.node + "), measured by scripts/60-bench.sh swarm."))
+emit(hbar([("idle, after warm-up", s.idle_rss_mb, 2)] +
+          [(f"{r.agents:,} agents in flight", r.rss_peak_mb, 1) for r in s.rows],
+          "MB", "{:.0f}",
+          claim=f"Peak resident memory of the swarm process. A thousand concurrent agents add {sw(1000).rss_peak_mb - s.idle_rss_mb:.0f} MB to an idle process of {s.idle_rss_mb:.0f} MB."))
+@end
+
+The process idles at {{R.swarm.idle_rss_mb|.0f}} MB, which is Node, the MCP client and the A2A client. With a thousand agents in flight it peaks at {{sw(1000).rss_peak_mb|.0f}} MB. The marginal cost settles at about {{sw(1000).heap_kb_per_agent|.0f}} KB of heap per agent. The first rows show a higher figure per agent only because a fixed overhead is being divided by a small number.
+
+What those kilobytes are: the evidence record with its log tail of a few hundred lines, the JSON-RPC request and reply buffers of the MCP calls, the A2A message, and the chain of promises that is the suspended function. Nothing in that list is a model or a conversation.
+
+At a thousand concurrent MCP calls Node printed a <code>MaxListenersExceededWarning</code>. It is a heuristic for finding leaks: more abort listeners were attached to one signal than its limit allows, because a thousand requests were in flight on one client. All thousand agents finished and acted. With the default concurrency of 16 the warning does not appear.
+
+The throughput column needs a warning of its own. {{sw(1000).incidents_per_s|.0f}} incidents per second is the capacity of the dispatcher and the agents when the backends answer in 100 ms. It is not the capacity of the system, because the real decision model is far slower than that.
+
+### s-cpu-only | CPU only: what it takes and where it stops
+
+Everything in the reflex path runs without a GPU. The cost is concentrated in one process.
+
+@py
+v, w = R.von, R.vonw
+emit(table(["Decision server (Von 1.3, PyTorch, CPU)", "Measured"], [
+ ("Resident memory", f"{v.rss_mb:,} MB"),
+ ("Process start until /health answers", f"{v.process_to_health_s} s"),
+ ("First decision after a boot, weights read from disk", f"{v.first_decision_ms / 1000:.0f} s"),
+ ("First decision after a restart, weights in the page cache", f"{w.first_decision_ms / 1000:.1f} s"),
+ ("One choice question, median (min to max)", f"{v.one_choice_question.p50_ms} ms ({v.one_choice_question.min_ms} to {v.one_choice_question.max_ms})"),
+ ("Two yes/no questions, median", f"{v.two_yes_no_questions.p50_ms} ms"),
+ ("8 choice requests from 4 concurrent callers", f"{v.eight_choice_requests_four_callers_s} s"),
+ ("The same 8 requests one after another", f"{v.sequential_equivalent_s} s"),
+], num=(1,), caption="Measured by bench/von.py on " + str(v.vcpus) + " vCPUs."))
+@end
+
+Three conclusions follow from that table.
+
+Memory is where the model is. The agents need tens of megabytes and the decision server needs {{R.von.rss_mb / 1024|.1f}} GB, most of it 1.5 GB of 32-bit weights and the PyTorch runtime. "A swarm with minimal memory" is true of the swarm and not of what it consults. A smaller footprint would have to come from a smaller or quantised decision model, and none was measured here.
+
+The health endpoint lies about readiness. The server answers <code>/health</code> after {{R.von.process_to_health_s}} s and its first decision takes {{R.von.first_decision_ms / 1000|.0f}} s on a cold disk, because the weights are loaded on first use. A Kubernetes probe that trusted <code>/health</code> would send traffic to a pod that cannot answer for minutes. The manifest's start-up probe therefore asks a real question (<code>deploy/k8s/10-decision.yaml</code>). This was found by measuring the first request separately from the rest, which is worth doing for any model server.
+
+Concurrency buys nothing on two cores. Eight requests from four callers took {{R.von.eight_choice_requests_four_callers_s}} s; the same eight in sequence took {{R.von.sequential_equivalent_s}} s. The model already uses both cores for one request. So the system's capacity is the decision server's: an incident whose runbook has to be chosen by the model needs one choice question and two yes/no questions, about {{(R.dec.latency_ms.grade_p50 + R.dec.latency_ms.guard_p50) / 1000|.1f}} s of model time, which is roughly {{60 / ((R.dec.latency_ms.grade_p50 + R.dec.latency_ms.guard_p50) / 1000)|.0f}} incidents per minute. The storm scenario showed the same thing from the other side: three agents at once each waited about {{med([x.ms.decide for x in sc("storm").records]) / 1000|.1f}} s for decisions that take {{med([r.records[0].ms.decide for r in R.scen.results if r.agents == 1]) / 1000|.1f}} s alone.
+
+For an on-call system that rate is ample, since that many distinct workloads failing in the same minute is a different kind of day. For a larger estate the remedy is more decision servers behind the same URL, which the stateless wire format allows, and more cores per server. The model card's figure of 0.096 s per decision on four vCPUs with OpenVINO suggests that the runtime matters as much as the core count; that was not verified here.
+
+### s-front-door | The serverless front door, and what cannot be serverless
+
+The dispatcher polls. In a larger installation alerts are pushed: an alerting system writes to a queue, and something has to turn each alert into a compact, deduplicated incident before any agent looks at it. That something is the intake function: parse one event, distil its log, compute the fingerprint, return.
+
+Intake is the one component in this design that fits a function-as-a-service platform, for three reasons that the others lack. It is stateless. Its load is bursty: nothing for hours, then a thousand alerts in a minute. And during such a burst the platform starts many new instances, so start-up time is paid on a large share of invocations. The last point is where the language matters, and ((ch-rust)) measures it: a static Rust binary against a Node bundle doing identical work.
+
+@code deploy/sam/template.yaml :: Resources: :: VisibilityTimeout
+
+<dl class="walk">
+<dt><code>Runtime: provided.al2023</code> with <code>Handler: bootstrap</code></dt>
+<dd>The custom runtime. Lambda starts an executable named <code>bootstrap</code> and expects it to fetch events from a local HTTP endpoint. There is no language runtime to initialise. The Rust binary is that executable.</dd>
+<dt><code>Type: SQS</code> with <code>BatchSize: 10</code></dt>
+<dd>Lambda polls the queue and hands the function up to ten alerts per invocation.</dd>
+<dt><code>ScalingConfig: {MaximumConcurrency: 50}</code></dt>
+<dd>At most fifty copies of the function run at once for this queue. The limit is back-pressure for everything behind the function: during a storm, alerts wait in the queue, where waiting is free.</dd>
+<dt><code>Runtime: nodejs22.x</code> with <code>Handler: intake-lambda.handler</code></dt>
+<dd>The same function as a bundled TypeScript handler, deployed side by side for comparison.</dd>
+</dl>
+
+One binary serves the command line, the benchmarks and Lambda. The switch is one line in <code>main</code>: if the environment variable <code>AWS_LAMBDA_RUNTIME_API</code> is set, the program is inside Lambda.
+
+@code rust/crates/intake/src/main.rs :: fn lambda_main() :: ^}
+
+<dl class="walk">
+<dt><code>tokio::runtime::Builder::new_current_thread()</code></dt>
+<dd>The Lambda runtime client is asynchronous and needs an executor. A single-threaded one is enough for a function that handles one event at a time, and it starts faster than a thread pool.</dd>
+<dt><code>lambda_runtime::run(service_fn(...))</code></dt>
+<dd>The loop that asks Lambda for the next event, calls the handler and posts the result. The async runtime is created only on this path; on the command line the program never starts it.</dd>
+<dt><code>handle(e.payload).map_err(Error::from)</code></dt>
+<dd><code>handle</code> accepts both shapes of input: a direct invocation carries the event itself, and an SQS trigger wraps events in <code>Records[].body</code>.</dd>
+</dl>
+
+The AWS SAM command line can run both functions locally in Lambda's emulation container. That was done, ten fresh containers each (<code>scripts/70-sam-local.sh</code>).
+
+@if R.sam
+@py
+rows = [(n, f"{getattr(R.sam, n).duration_ms_p50:.1f} ms", f"{getattr(R.sam, n).container_wall_ms_p50 / 1000:.1f} s") for n in R.sam]
+emit(table(["Function", "Reported duration, first invocation", "Wall time of sam local invoke"], rows, num=(1, 2),
+           caption="Medians of 10 fresh emulator containers each."))
+@end
+
+The emulator's numbers have to be read for what they are. The wall time of about {{R.sam.IntakeRust.container_wall_ms_p50 / 1000|.1f}} s is Docker starting a container, the same for both. The reported duration of the first invocation is where the two differ: {{R.sam.IntakeRust.duration_ms_p50|.1f}} ms for the Rust binary and {{R.sam.IntakeTs.duration_ms_p50|.0f}} ms for the Node bundle, because the Node handler's module is loaded on the first call. The emulator does not reproduce Lambda's own initialisation phase, so these are not Lambda cold starts.
+@else
+The SAM result file was not present when this page was generated.
+@endif
+
+Real cold starts need a real account. <code>scripts/72-sam-aws-coldstart.sh</code> deploys the stack, forces a cold start before each invocation by changing an environment variable, reads Lambda's own <code>Init Duration</code> from the log, and deletes the stack. It creates billable resources, so it asks for confirmation, and it was not run for this tutorial.
+
+Everything else stays on Kubernetes, and the reasons are specific to each component.
+
+@py
+emit(table(["Component", "Runs on", "Why not as a function"], [
+ ("intake", "Lambda, or the same binary anywhere", "it is the exception: stateless, bursty, start-up sensitive"),
+ ("kube-ops MCP server", "Kubernetes, one pod", "holds the cluster credential and needs a network path to the API server; the action budget lives in its memory"),
+ ("swarm dispatcher", "Kubernetes, two pods", "a loop that polls; a function has nothing to trigger it"),
+ ("retrieval agent", "Kubernetes", "loads an embedding model and an agent framework at start, " + f"{cs('service: retrieval agent (LangGraph + A2A), load only').p50_ms:.0f} ms before the first request could be served"),
+ ("reason agent", "Kubernetes", f"{cs('service: reason agent (ADK + MCP + A2A), load only').p50_ms:.0f} ms of framework start-up, and conversations that last many seconds"),
+ ("decision model", "Kubernetes, CPU", f"{R.von.rss_mb / 1024:.1f} GB resident and seconds to minutes until the first answer"),
+ ("vLLM", "Kubernetes, GPU", "loading a model onto a GPU takes far longer than a request may wait, and its prefix cache is state worth keeping"),
+]))
+@end
+
+### s-quiz-swarm | Check
+
+@quiz
+? A thousand agents in flight add roughly {{sw(1000).heap_kb_per_agent|.0f}} KB of heap each. What is in those kilobytes?
+- A copy of the decision model's weights :: The model is a separate server shared by all agents. No agent holds any part of it.
+- A thread stack :: Agents are not threads. Node runs them all on one thread.
++ The evidence for one workload, request and reply buffers, and the suspended function's promises :: An agent is a function call waiting for the network. Its state is the data it is carrying.
+? Two dispatcher pods notice the same crashed workload in the same second. What decides which one handles it?
+- The pod with the lower name wins :: Nothing compares names.
++ Both try to create the same Lease object; the API server accepts one request and answers 409 to the other :: Atomic creation in a consistent store is the mutual exclusion. Neither dispatcher needs to know that the other exists.
+- The MCP server remembers who asked first :: The server is stateless per request; the memory is the Lease in the cluster.
+? The decision server answers <code>/health</code> seconds after starting. Why does the start-up probe ask a real question?
+- Kubernetes does not support HTTP probes on port 8100 :: It supports them on any port.
+- To warm the CPU cache :: That is not the reason, though it is a side effect.
++ The weights are loaded on first use, so the server is alive long before it can decide anything :: A pod that is marked ready while its first answer is minutes away would receive incidents it cannot handle. The probe has to test the thing the pod is for.
+? Why is the intake function the only component packaged for Lambda?
++ It is stateless and bursty, and start-up time is paid on many of its invocations; every other component is long-lived, holds state or a model, or takes too long to start :: The table of reasons is different for each of the others, and each reason is enough alone.
+- Lambda cannot run TypeScript :: It can; the template deploys a TypeScript version of intake next to the Rust one.
+- The other components are too large for a deployment package :: Size is not the obstacle. Start-up time, state and the need for a GPU or a cluster credential are.
+@end

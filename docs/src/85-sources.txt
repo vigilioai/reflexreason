@@ -1,0 +1,20 @@
+## app-sources | Sources | appendix
+
+Pages read for the design and quoted in the text:
+
+<ul>
+<li><a href="https://www.datacamp.com/blog/top-open-source-jev-alternatives">DataCamp, "Top open-source Jev alternatives"</a>: the survey of decision models and the <code>/v1/systemone</code> format.</li>
+<li><a href="https://huggingface.co/wfzyx/von">Hugging Face, wfzyx/von</a>: the model card of Von 1.3, including its limitations, calibration notes and archived status.</li>
+<li><a href="https://recipes.vllm.ai/Qwen/Qwen3.5-4B.md">vLLM recipes, Qwen/Qwen3.5-4B</a>: the serving flags, the minimum vLLM version and the hardware prerequisites.</li>
+<li><a href="https://docs.k3s.io/advanced">k3s documentation, Advanced options</a>: the NVIDIA container runtime and the <code>nvidia</code> RuntimeClass.</li>
+</ul>
+
+Announcements behind dates in the background notes:
+
+<ul>
+<li><a href="https://blog.modelcontextprotocol.io/posts/2025-12-09-mcp-joins-agentic-ai-foundation/">Model Context Protocol blog, 9 December 2025</a>: MCP joins the Agentic AI Foundation.</li>
+<li><a href="https://linuxfoundation.org/press/linux-foundation-launches-the-agent2agent-protocol-project-to-enable-secure-intelligent-communication-between-ai-agents">Linux Foundation</a>: launch of the Agent2Agent protocol project.</li>
+<li><a href="https://developers.googleblog.com/en/introducing-agent-development-kit-for-typescript-build-ai-agents-with-the-power-of-a-code-first-approach/">Google Developers Blog</a>: Agent Development Kit for TypeScript.</li>
+</ul>
+
+The APIs of the SDKs were taken from the installed packages at the versions pinned in <code>ts/package.json</code>, and every behaviour described was exercised by the code in this package. The optional <code>--k8s-docs</code> ingestion fetches pages of the Kubernetes documentation, which is published under CC BY 4.0. All measurements are this project's own; the files are in <code>bench/results/</code>.

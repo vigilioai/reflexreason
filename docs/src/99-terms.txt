@@ -1,0 +1,181 @@
+@term runbook | Runbook
+The word comes from mainframe operations, where the "run book" was a binder of procedures that told an operator what to do when a job failed. It survives in site reliability practice as the written procedure for one kind of incident.
+
+The usual failure of a runbook is drift: it describes the system as it was when someone last had time to write. A runbook that a program also reads has one advantage here. Its front matter is exercised on every incident, so a wrong action name or symptom shows up as a failed match and not as a surprise at night.
+
+@term kahneman | System 1 and System 2
+Daniel Kahneman's "Thinking, Fast and Slow" (2011) made the two labels famous; the terms themselves were proposed by the psychologists Keith Stanovich and Richard West in 2000. System 1 stands for fast, automatic judgement, System 2 for slow, effortful reasoning.
+
+It is a metaphor about kinds of processing, not a claim that the brain has two parts, and some of the experiments popularised alongside it did not replicate. In AI engineering the labels are used loosely for "a cheap model that answers at once" and "an expensive one that deliberates".
+
+@term jev | Jev and System One models
+Jev is a commercial decision model from TypeSafe AI. According to the survey this project started from, it takes application state plus structured questions and returns typed decisions (a choice, a score, a yes or no with a probability) at an endpoint named <code>/v1/systemone</code>, without generating text. Its architecture, weights and training data are not public.
+
+Several open projects reproduce the idea with different base models: [[von|Von]], Kev, Rizzo Flow, Laya, Nimble, SemIf and NanoJev. The same survey warns that these projects are very new, change quickly, and that not every published example had been tested end to end. Treat any latency or accuracy claim in this area as something to measure, which is what this tutorial does for one of them.
+
+@term von | Von 1.3
+An open decision model published as <code>wfzyx/von</code> under Apache-2.0: a fine-tuned [[modernbert|ModernBERT-large]] with a scoring head over option markers, 395 million parameters, 1.5 GB in 32-bit floats, English only, with a context of 8,192 tokens. Version 1.3 is an engine release with the weights of 1.2.
+
+Its model card is unusually frank. It lists weak performance on long multi-clause policies and on multi-step numeric reasoning, says that inputs unlike the training data can produce confident wrong answers, and states that the built-in calibration was fitted on its own benchmark and does not carry to other data. It reports 0.096 s per decision on four vCPUs with OpenVINO and 0.023 s on an A10G GPU.
+
+The repository is archived: the card says the model is no longer maintained and the weights will not be updated, and points new projects to another model. For a demonstration that is an advantage, since the numbers stay reproducible. For anything long-lived it is a reason to keep the decision model behind its URL and to keep the benchmark that refits the thresholds.
+
+@term modernbert | ModernBERT
+An encoder-only transformer released in December 2024 by Answer.AI, LightOn and collaborators as a modernised BERT: rotary position embeddings, alternating local and global attention, and a context of 8,192 tokens where BERT had 512. The large variant has 395 million parameters.
+
+An encoder reads its whole input at once and produces a representation of it; it does not produce text token by token. That makes it fast and well suited to classification and retrieval, and unable to explain an answer. Models of this family are the usual base for classifiers, rerankers and embedding models.
+
+@term prompt-injection | Prompt injection
+The name was coined by Simon Willison in September 2022, after Riley Goodside showed that text appended to a prompt could override the instructions before it. The variant that matters for agents is indirect injection, described by Greshake and colleagues in 2023: the hostile instructions arrive inside data the model was asked to process, such as a web page, an email or a log.
+
+It heads the OWASP list of risks for language model applications, and there is no general fix, because a model has one channel for instructions and data. Filters reduce the rate. What bounds the damage is architecture: least privilege, tools that cannot do harm, and keeping untrusted text away from components that can act.
+
+@term mcp | Model Context Protocol (MCP)
+Published by Anthropic in November 2024 as an open protocol between AI applications and the systems they use. A server offers tools, resources and prompts; a client calls them with JSON-RPC 2.0. The first transports were standard input and output for local servers and HTTP with server-sent events for remote ones; the March 2025 revision replaced the latter with Streamable HTTP, which this project uses in its stateless form. In December 2025 the protocol was donated to the Agentic AI Foundation under the Linux Foundation.
+
+The protocol standardises how a tool is described and called, not what it is allowed to do. Two pitfalls follow. A tool's description is text the model reads, so a malicious server can use it to steer the model. And a server that holds broad credentials turns every caller into a holder of those credentials, which is the [[confused-deputy|confused deputy]] problem.
+
+@term confused-deputy | Confused deputy
+Norm Hardy described it in 1988 with a compiler that had permission to write a billing file and could be tricked, by a user naming that file as an output, into overwriting it. The deputy has authority; the party directing it does not; nothing connects the request to the authority of whoever made it.
+
+A tool server for agents is a deputy by construction. The request comes from a model, the model's intent comes from text it read, and the text may come from anyone. The remedy is the old one: give the deputy only the authority that is safe to exercise for any caller.
+
+@term a2a | Agent2Agent protocol (A2A)
+Announced by Google in April 2025 and given to the Linux Foundation in June of the same year. An agent publishes an agent card, a JSON document at a well-known URL that states its name, skills and endpoint, and other agents send it messages and track tasks over JSON-RPC; later versions add gRPC and REST bindings.
+
+Where [[mcp|MCP]] connects a model to tools, A2A connects agents to each other without either seeing the other's tools or memory. Two practical cautions from this project: the JavaScript SDK has a 0.3 line and an incompatible 1.x line, and a framework pins one of them; and the protocol defines the envelope, not who may send it, so an A2A port without authentication runs the agent for anyone who can reach it.
+
+@term adk | Agent Development Kit (ADK)
+Google's open-source framework for building agents, released for Python in April 2025 and since extended to other languages including TypeScript. It supplies the agent loop, tool abstractions, sessions, and adapters for MCP and [[a2a|A2A]].
+
+The TypeScript package used here, version 2.4.0, ships model classes for Gemini only; any other model needs a subclass of its base model class, which is the adapter in ((ch-reason)). It is also the heaviest import in the project by a wide margin, so it belongs in long-running services and not in anything started per request.
+
+@term skill | Agent skills
+A skill is a directory with a <code>SKILL.md</code> file whose header carries a name and a one-line description, followed by instructions, and optionally scripts and reference files beside it. Anthropic introduced the format in October 2025 and later published it as an open specification; other frameworks, ADK among them, read it.
+
+The idea is progressive disclosure: only the name and description occupy the prompt until the model decides it needs the procedure. The caution is that a skill is instructions the model will follow. A skill from an unknown source deserves the same review as code from an unknown source.
+
+@term vllm | vLLM
+An open-source inference server for language models that began at UC Berkeley's Sky Computing Lab; its core technique, PagedAttention, was published at SOSP in 2023. It batches requests continuously, manages the [[kv-cache|KV cache]] in pages much as an operating system manages memory, and exposes an OpenAI-compatible HTTP interface.
+
+It is built for throughput on GPUs and assumes a long-lived process. Its flags are specific to each model family, especially for tool calling, which is why model recipes exist and why the flags in this project are copied from one.
+
+@term kv-cache | KV cache
+While generating, a transformer needs, for every earlier token and every layer, two tensors called keys and values. Recomputing them for each new token would make generation quadratic, so they are kept. That store is the KV cache.
+
+Its size grows with the number of tokens in flight, which is why the maximum context length and the number of concurrent sequences decide whether a model fits on a card, more than the weights alone do.
+
+@term prefix-caching | Prefix caching
+If two prompts start with the same tokens, the [[kv-cache|KV cache]] entries for that shared start are identical, and a server can keep them from one request and reuse them for the next. vLLM calls this automatic prefix caching; hosted APIs sell the same thing as prompt caching.
+
+Reuse stops at the first token that differs. Timestamps, request ids, reordered tools and unstable JSON key order near the start of a prompt are the usual ways to lose it. On a server shared between tenants there is also a privacy angle, since a fast answer reveals that someone recently sent the same prefix; the server in this project has one tenant.
+
+@term fault-injection | Fault injection
+The practice of deliberately introducing a fault to observe how a system handles it. It began in dependability engineering for hardware in the 1970s, with faults injected at the pins of circuits, and moved into software in the following decades.
+
+Today the same act is automated by tools such as Chaos Mesh and LitmusChaos for Kubernetes and by fault injection services of the cloud providers. The term names the act only; the method around it is [[chaos-engineering|chaos engineering]].
+
+@term chaos-engineering | Chaos engineering
+Netflix built Chaos Monkey in 2010, while moving to AWS, to terminate production instances at random during working hours so that services had to tolerate the loss, and released it as open source in 2012. The practice that grew from it was later written down as the Principles of Chaos Engineering.
+
+The method is an experiment: define the steady state in measurable terms, state the hypothesis that it will hold, inject a [[fault-injection|fault]], limit how far the damage can spread, and compare. Without the hypothesis and the measurement it is only breaking things.
+
+@term game-day | Game day
+A scheduled exercise in which a team injects failures into a system and practises detecting and handling them. The term is associated with Amazon in the early 2000s, where Jesse Robbins ran such exercises.
+
+A game day tests people and procedures as much as software: who is paged, whether the runbook is findable, whether the dashboard shows the fault. It needs an agreed scope and a way to stop.
+
+@term rbac | Kubernetes RBAC
+Role-based access control became stable in Kubernetes 1.8 in 2017. A Role lists verbs on resources within a namespace, a ClusterRole does so cluster-wide, and bindings attach them to users, groups or ServiceAccounts.
+
+Rules only add permissions; there is no deny. The common mistakes are wildcards, and permissions that are wider than they sound: <code>pods/exec</code> is a shell, <code>list</code> on Secrets reveals their contents, and the verbs <code>bind</code> and <code>escalate</code> allow granting more. <code>kubectl auth can-i --as</code> asks the API server what an identity may really do.
+
+@term dry-run | Server-side dry run
+Adding <code>dryRun=All</code> to a write request tells the Kubernetes API server to run it through authentication, authorisation, admission and validation and then discard it. The feature has been generally available since Kubernetes 1.18.
+
+A dry run proves that the API accepts the request with the caller's permissions. It does not prove that the change would work: an image that does not exist passes a dry run. Admission webhooks have to declare that they have no side effects for dry runs to be allowed through them.
+
+@term replicaset | ReplicaSets and revisions
+A Deployment does not manage pods directly. For each version of its pod template it creates a ReplicaSet, and a rollout is the gradual scaling of the new one up and the old one down. Old ReplicaSets are kept at zero replicas, each annotated with a revision number.
+
+How far back a rollback can go is set by <code>revisionHistoryLimit</code>, ten by default. A Deployment whose history has been trimmed to nothing cannot be rolled back at all.
+
+@term drain | Drain and log templates
+Drain, published by He, Zhu, Zheng and Lyu in 2017, parses a log stream online by routing each line through a fixed-depth tree, first by length and leading tokens, and merging it into the closest template at the leaf. It remains a standard baseline, and a maintained implementation exists as Drain3.
+
+Template mining reduces a log to its distinct messages with counts. The project in this tutorial uses a far cruder rule in the same spirit, which is adequate for triage and would not be for analytics.
+
+@term fnv | FNV-1a
+A hash function by Fowler, Noll and Vo from 1991: start from a fixed offset, and for each byte, exclusive-or it in and multiply by a fixed prime. It is a few lines of code and gives the same result in every language and every process.
+
+It is not cryptographic and collisions are easy to construct on purpose. That is acceptable for a fingerprint of trusted input and wrong for any table an attacker can fill, which is why the gateway uses a keyed hash for its cache.
+
+@term noul | Noul
+The name of the yes/no question type in the System One wire format. Von's model card defines it as a two-option choice between "the condition holds" and "it is false", optionally with the caller's own descriptions of the two.
+
+The card also describes the banding rule applied to the reported value, which pushes every answer outside the range from 0.2 to 0.8, and a server flag for returning raw values. Anything that applies its own threshold must read the raw probability.
+
+@term rag | Retrieval-augmented generation (RAG)
+Introduced under that name by Lewis and colleagues at Facebook AI Research in 2020: retrieve passages relevant to a question from an external corpus and condition a generator on them, so that the model can answer from documents it was never trained on.
+
+Retrieval quality is the ceiling of the whole arrangement, and it is usually evaluated too little: a system is judged by its final answers, and a retrieval failure looks like a hallucination. Measuring retrieval alone, as the chunking experiment in ((ch-rag)) does, is the first discipline.
+
+@term minilm | all-MiniLM-L6-v2
+A sentence embedding model from the sentence-transformers project: six transformer layers, about 22 million parameters, 384-dimensional output, distilled from Microsoft's MiniLM and trained on over a billion sentence pairs.
+
+It is small and fast and has two limits worth knowing. Input beyond 256 word pieces is cut off without notice, so long chunks are embedded by their beginning only. And it was trained on English.
+
+@term qdrant | Qdrant
+An open-source vector database written in Rust, first released in 2021. It stores vectors with a JSON payload, searches them with an HNSW index, and can apply payload filters during the search.
+
+A dedicated vector store is justified by scale, by concurrent writers or by filtering needs. Below that, it is an extra service to operate for what a loop can do.
+
+@term langgraph | LangGraph
+A library from the makers of LangChain, released in early 2024 and at version 1.0 since October 2025, for expressing an agent or pipeline as a graph: nodes are functions over a shared, typed state, and edges, which may be conditional, decide what runs next. Its execution model is inspired by Google's Pregel.
+
+Its value grows with branching, cycles, persistence and human approval steps. For a straight line of three calls it is structure for its own sake, and it has a real import cost, which this tutorial measures.
+
+@term lease | Kubernetes Lease
+An object in the <code>coordination.k8s.io</code> API group with a holder, a duration and a renewal time. Kubelets renew one per node as a heartbeat, and controllers use them for leader election.
+
+Nothing in the API server enforces expiry. A Lease is a record that clients agree to interpret, and each client compares the renewal time with its own clock, so the scheme assumes clocks that roughly agree.
+
+@term optimistic-concurrency | Optimistic concurrency
+A technique described by Kung and Robinson in 1981: do not lock data while working on it; at write time, check that nobody else changed it meanwhile, and retry if they did. It suits systems where conflicts are rare.
+
+Kubernetes implements it with the <code>resourceVersion</code> on every object. An update that carries an outdated version is rejected with 409 Conflict.
+
+@term single-flight | Single flight
+Named after the <code>singleflight</code> package in Go, which came out of Brad Fitzpatrick's groupcache in 2013. When several callers ask for the same key at the same time, one does the work and the rest wait for its result. It prevents the cache stampede, in which an expired entry is recomputed by everyone at once.
+
+The trade is shared fate. If the one call fails or is slow, everyone who joined it fails or is slow with it.
+
+@term nagle | Nagle's algorithm and delayed ACK
+John Nagle's 1984 rule, RFC 896, tells a TCP sender not to send a small segment while earlier data is still unacknowledged. It was written for interactive terminals on slow links. Delayed acknowledgement, a separate mechanism, lets a receiver wait a short time before acknowledging, in the hope of combining the acknowledgement with a reply.
+
+Each is sensible alone. Together they stall any application that writes a message in two small pieces and then waits for the answer. The standard remedy is the socket option <code>TCP_NODELAY</code>, which many HTTP libraries set by default and some do not.
+
+@term cold-start | Cold start
+On a function platform, the first request to a new instance pays for everything a warm instance already has: fetching the code, starting the runtime, loading modules, running initialisation. AWS Lambda reports that part separately as the init duration.
+
+Platforms offer ways to pay it ahead of time, such as keeping instances warm or restoring from a snapshot. The other approach is to make the program cheap to start, which is the one this tutorial measures.
+
+@term compile-cache | Node's compile cache
+Since version 22.1, Node can store V8's compiled bytecode for loaded modules in a directory, selected with the <code>NODE_COMPILE_CACHE</code> environment variable or from code, and reuse it on later starts.
+
+It needs a writable directory, the first start with an empty cache is slightly slower, and a cache from one Node version is not used by another. It helps in proportion to how much JavaScript a program loads.
+
+@term networkpolicy | Kubernetes NetworkPolicy
+A NetworkPolicy selects pods and lists the connections they may accept or open. A pod that no policy selects is unrestricted; once any policy selects it, only the listed traffic is allowed.
+
+The API server stores policies and does nothing else with them. Enforcement belongs to the cluster's network plugin, and on a cluster whose plugin does not implement it the policies are accepted and silently ignored. Always test with a connection that should fail.
+
+@term musl | musl and static linking
+musl is a small implementation of the C standard library, first released in 2011 and best known as the library of Alpine Linux. Rust can target it, and the result is a binary with no dynamic dependencies.
+
+A static binary runs on any Linux of the same architecture and starts without a loader step. The costs are a memory allocator that is slower than glibc's under contention and small behavioural differences, for example in name resolution.
+
+@term esbuild | esbuild
+A JavaScript and TypeScript bundler written in Go by Evan Wallace and first released in 2020. It is fast enough that bundling stops being a noticeable build step.
+
+It strips TypeScript types without checking them, so a project still needs the TypeScript compiler for type errors. Packages with native addons cannot be bundled and have to stay external.

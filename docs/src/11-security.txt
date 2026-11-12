@@ -1,0 +1,130 @@
+## ch-security | Security: what each layer stops
+
+### s-threats | Four ways this system can do harm
+
+An automation that changes production has to be judged by its failures. There are four that matter here, and each is answered by something different.
+
+@py
+emit(table(["What goes wrong", "What stops it", "Evidence", "What remains"], [
+ ("The decision model matches the wrong runbook",
+  "A probability threshold; the policy's preconditions; only reversible actions exist",
+  inline("No wrong action on the labelled set at any threshold examined (((s-threshold)))"),
+  "The set is small and the threshold was tuned on it"),
+ ("A log line addresses the agent",
+  "The guard on both paths; no language model on the reflex path; no write tools on the reason path",
+  inline("All injected lines caught in the benchmark and in the scenario (((s-guard)))"),
+  "A margin of a few hundredths; dilution by surrounding text"),
+ ("An agent process is taken over",
+  "It holds no cluster credential; write tools need a token only the swarm has; the server's limits; RBAC",
+  inline("The door check (((s-rbac)), ((s-guards)))"),
+  "Three reversible writes per workload per ten minutes, in one namespace"),
+ ("The automation loops or flaps",
+  "The action budget; no second action after a failed verification; escalations remembered",
+  "Unit tests of the policy; the budget's refusal is in the code path every write takes",
+  "The budget is per server process and lives in memory"),
+]))
+@end
+
+The fourth column is the honest one. Nothing in it is hidden by a later paragraph.
+
+### s-tokens | Two tokens and a comparison that takes constant time
+
+Two ports in this system would run tools for anyone who could reach them: the A2A ports of the two agents, and the MCP port. Each has its own shared secret.
+
+@code ts/src/a2a/auth.ts :: export function assertSafeToListen :: res.status\(401\) +1
+
+<dl class="walk">
+<dt><code>if (!token &amp;&amp; !loopback) throw new Error(...)</code></dt>
+<dd>A server without a token may only listen on the loopback interface, where nothing off the machine can reach it. That is the developer's laptop. Asked to listen on a routable address without a token, the process refuses to start. A security property that depends on someone remembering a setting should fail closed when the setting is missing.</dd>
+<dt><code>req.path.startsWith("/.well-known/") || req.path === "/healthz"</code></dt>
+<dd>Two paths stay open: the agent card, which A2A clients must be able to read before they can authenticate, and the health check, which the kubelet calls without credentials. Neither runs an agent.</dd>
+<dt><code>sameSecret(given, `Bearer ${token}`)</code></dt>
+<dd>The comparison is delegated, for the reason below.</dd>
+</dl>
+
+@code ts/src/secret.ts :: export function sameSecret :: ^}
+
+<dl class="walk">
+<dt><code>a.length === b.length &amp;&amp; timingSafeEqual(a, b)</code></dt>
+<dd>An ordinary string comparison stops at the first character that differs, so a wrong guess that starts correctly takes slightly longer to reject than one that does not. Over many attempts that difference can be measured, and a secret can be recovered one character at a time. <code>timingSafeEqual</code> always examines every byte. It requires equal lengths, hence the first test; the length of a token is not what needs protecting.</dd>
+</dl>
+
+The door check sent the same requests with and without the token.
+
+@py
+a = R.door.a2a
+emit(table(["Request", "HTTP status"], [
+ ("retrieval agent, message without token", a.rag_without_token),
+ ("retrieval agent, message with token", a.rag_with_token),
+ ("reason agent, message without token", a.reason_without_token),
+ ("reason agent, agent card without token", a.reason_agent_card_without_token),
+], num=(1,)))
+@end
+
+A shared token answers "may this caller use the port" and nothing finer. Every holder looks the same to the server, and between pods the token travels over plain HTTP. For a cluster where the pod network itself is not trusted, the next step is mutual TLS between workloads, which a service mesh provides without changes to this code. That step was not taken here.
+
+### s-netpol | Network policy: who can reach whom
+
+Tokens decide who may use a port. [[networkpolicy|NetworkPolicy]] decides who can reach it at all.
+
+@code deploy/k8s/40-networkpolicy.yaml :: # Nothing in the oncall namespace :: values: \[kube-ops-mcp, rag, reason, decision\]
+
+<dl class="walk">
+<dt><code>podSelector: {}</code> with <code>policyTypes: [Ingress, Egress]</code> and no rules</dt>
+<dd>The first policy selects every pod in the namespace and allows nothing. From then on, a connection exists only if some other policy names it.</dd>
+<dt><code>allow-dns</code></dt>
+<dd>Every pod may resolve names. Without this exception nothing else works, and the failure looks like a timeout in whatever the pod tried first.</dd>
+<dt><code>swarm-egress</code></dt>
+<dd>The dispatcher pods may open connections to four kinds of pod and to nothing else. There is no rule that lets any agent pod reach an address outside the cluster.</dd>
+</dl>
+
+The remaining policies follow the same pattern, and the whole file reads as the arrow list of the architecture figure in ((s-architecture)): the reason agent may reach the MCP server, the retrieval agent, the decision model and the gateway; the retrieval agent may reach the decision model; only the MCP server may reach the Kubernetes API. The vLLM pod has no egress rule at all. Its model was downloaded beforehand by <code>scripts/15-fetch-model.sh</code>, and it starts in offline mode. That matters more than usual for this model, because its recipe requires <code>--trust-remote-code</code>: the model repository contains Python that vLLM executes. A pod that runs downloaded code should at least be unable to phone anywhere.
+
+@if R.incluster
+The policies were applied on the test cluster with the agents running as pods, and three connections were attempted by <code>scripts/55-incluster-check.sh</code>.
+
+@py
+n = R.incluster.netpol
+emit(table(["Connection attempted", "Result"], [
+ ("a pod without a label, to the MCP server", n.stranger_to_mcp),
+ ("a swarm pod, to the MCP server", n.swarm_to_mcp),
+ ("a swarm pod, to an address on the internet", n.swarm_to_internet),
+]))
+@end
+
+@if R.incluster.netpol_enforced
+The stranger was kept out, the agent was let through to the one place it needs, and the agent could not leave the cluster. NetworkPolicy is only enforced if the cluster's network plugin implements it; k3s ships a controller that does, and this result is what shows that it was active.
+@else
+That is not the result the policies describe, and it is reported as measured. NetworkPolicy is only enforced if the cluster's network plugin implements it. On the test machine, a sandbox without the kernel features the k3s policy controller relies on, the policies were accepted and not enforced. The same check on a normal k3s installation is the way to find out whether yours are.
+@endif
+@else
+These policies were validated against the API server with a server-side dry run and were not exercised with running pods for this tutorial. NetworkPolicy is only enforced if the cluster's network plugin implements it; k3s ships a controller that does. The check takes one command: start a throwaway pod in the namespace and try to reach the MCP server, which must time out.
+
+@pre
+kubectl -n oncall run probe --rm -it --restart=Never --image=busybox:1.36 \
+  -- wget -qO- -T 3 http://kube-ops-mcp:7001/healthz
+@end
+@endif
+
+### s-residual | What is not defended
+
+The thresholds were chosen on the data they are reported on. The guard's margin is narrow and a line can hide among others. The action budget forgets on restart. The tokens are shared secrets over plain HTTP. Kubernetes Secrets are base64, not encryption, unless the cluster encrypts them at rest. The npm dependency tree is {{R.build.npm_packages}} packages that were pinned by a lock file and not audited one by one. And the language model, on the machine where it will finally run, executes code from its model repository.
+
+None of these is unusual, and each has a standard remedy. They are listed because the measure of a design like this is not the number of defences. It is whether the worst case is small when a defence fails, and here the worst case is bounded by things that are not probabilistic: operations that do not exist, a Role with one verb, and a budget.
+
+### s-quiz-security | Check
+
+@quiz
+? A server is configured to listen on all interfaces and no A2A token is set. What happens?
+- It starts and logs a warning :: A warning is easy to miss in a pod log, and the port would be open in the meantime.
++ It refuses to start :: A missing secret must not silently produce an open port. The process exits with a message that names the missing variable.
+- It starts and accepts only requests from the local machine :: It could not tell; that is what the listen address is for.
+? Why does the vLLM pod get no egress at all?
+- vLLM cannot use a network :: It can, and by default it would contact the model hub.
+- Egress would slow down inference :: Network policy has no effect on inference speed.
++ It executes Python from the model repository, so it is the pod that should be least able to contact the outside :: The model is fetched in advance by a script a person runs and can inspect; the pod then runs offline.
+? Which of these limits is not probabilistic?
+- The class threshold :: It is a cut on a model's probability and can be wrong in both directions.
+- The injection guard :: It is a model's judgement with a narrow margin.
++ The absence of any delete operation in the tools and in the Role :: No input changes what code exists or what a Role allows. That is why the worst case is bounded even when both models are wrong.
+@end

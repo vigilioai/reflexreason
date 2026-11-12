@@ -1,0 +1,170 @@
+## ch-rag | Runbooks and the retrieval pipeline
+
+@py
+emit(pipeline([
+ ("Runbooks", ["eight Markdown", "files, written", "by people"]),
+ ("Chunk", ["one chunk", "per section"]),
+ ("Embed", ["MiniLM on CPU,", "384 numbers", "per chunk"]),
+ ("Index", ["a JSON file,", "or Qdrant"]),
+ ("Search", ["filter by", "symptom, rank", "by similarity"]),
+ ("Grade", ["decision model:", "which one,", "or none"]),
+], "The first four boxes run once, at build time. The last two run for every incident, inside the retrieval agent."))
+@end
+
+### s-rag-why | Retrieval without generation
+
+[[rag|Retrieval-augmented generation]] was introduced to give a language model facts it was not trained on: retrieve passages, put them in the prompt, generate an answer. This pipeline keeps the first half and replaces the second. It retrieves candidate runbooks and then asks a decision model to choose one or none. Nothing is generated, so nothing can be invented: the answer is the id of a file that exists, an action name read from that file's header, and a probability.
+
+With eight runbooks, retrieval may look unnecessary: all eight could be offered as options. Two reasons argue against it. The option list is the decision model's whole world, and the previous chapter showed how sensitive the probabilities are to what is in it, so it is kept to three candidates plus "none". And the design has to stay the same at eighty runbooks or eight hundred, where offering everything is not possible. The procedures stay in Markdown, where the people who are paged can read and change them, and adding a fault class is adding a file and rebuilding an index. No code changes and nothing is retrained.
+
+### s-runbook | What a runbook is
+
+@code runbooks/stale-feed.md :: --- :: ^---$
+
+<dl class="walk">
+<dt><code>symptoms: [LogAnomaly]</code></dt>
+<dd>The Kubernetes symptoms under which this runbook is filed. Retrieval only considers runbooks filed under the symptom of the incident at hand. A stalled feed has no Kubernetes symptom at all, so its runbook is filed under the name the dispatcher gives to log-only findings.</dd>
+<dt><code>match: Feed heartbeat gap or sequence gap warnings: market data is stale</code></dt>
+<dd>The option text shown to the decision model. It is the single most tuned line in the project, and ((s-threshold)) tells why it is phrased in the log's vocabulary.</dd>
+<dt><code>action: rollout_restart</code></dt>
+<dd>What the policy may do when this runbook is matched. A runbook without an <code>action</code> line is parsed as <code>escalate</code>: a missing field can only make the system more cautious.</dd>
+</dl>
+
+The body has five fixed sections. They are written for a person, and two of them are also used by the pipeline: <em>Recognise</em> is what retrieval matches against most often, and <em>Remediate</em> is returned with the match.
+
+@py
+import pathlib, re
+body = (pathlib.Path(RES).parent.parent / "runbooks" / "stale-feed.md").read_text().split("\n---\n", 1)[1]
+rows = [(esc(m.group(1)), esc(m.group(2).strip())) for m in re.finditer(r"## (.+)\n([^#]+)", body)]
+assert len(rows) == 5
+emit(table(["Section", "Text of runbooks/stale-feed.md"], rows))
+@end
+
+### s-chunk | Ingestion and chunking
+
+@code ts/src/rag/ingest.ts :: export async function chunkRunbooks :: ^}
+
+<dl class="walk">
+<dt><code>RecursiveCharacterTextSplitter.fromLanguage("markdown", { chunkSize, chunkOverlap })</code></dt>
+<dd>LangChain's splitter. It cuts text into pieces of at most <code>chunkSize</code> characters and prefers to cut at Markdown boundaries: headings first, then paragraphs, then sentences. "Recursive" means that it only falls back to a finer boundary when a piece is still too large.</dd>
+<dt><code>const sections = o.bySection ? rb.body.split(/\n(?=## )/) : [rb.body];</code></dt>
+<dd>The option that mattered. With <code>bySection</code>, the body is first divided at every second-level heading and each section is split on its own, so a chunk never contains parts of two sections. The lookahead <code>(?=## )</code> splits before a heading without consuming it, so each piece still starts with its own heading.</dd>
+<dt><code>const section = /^##\s+(.+)$/m.exec(piece)?.[1] ?? ...</code></dt>
+<dd>Each chunk is labelled with the heading it belongs to. Later, the graph looks for the chunk labelled "Remediate". That lookup is the reason section boundaries are not a matter of taste here.</dd>
+<dt><code>text: o.header ? `${rb.title}. ${rb.match}\n${piece}` : piece</code></dt>
+<dd>Optionally, each chunk is prefixed with the runbook's title and match line, so that a chunk such as the Verify section still says which fault it is about.</dd>
+<dt><code>symptoms: rb.symptoms, match: rb.match, action: rb.action, ...</code></dt>
+<dd>The front matter travels with every chunk as metadata. A search hit therefore carries everything the grader and the policy need, and the Markdown file is not read again at query time.</dd>
+</dl>
+
+Chunking advice is usually given as a number of characters. Here it was measured. Each of five variants was indexed and queried with the {{R.chunk.rows[0].of}} known states from the labelled set, with no symptom filter, so that the embedding had to do all the work. A hit at 1 means the right runbook's chunk ranked first; a hit at 3 means the right runbook was among the first three runbooks.
+
+@py
+rows = [(esc(r.variant), r.chunks, r.mean_chars, f"{r.hit_at_1} of {r.of}", f"{r.hit_at_3} of {r.of}") for r in R.chunk.rows]
+emit(table(["Variant", "Chunks", "Mean characters", "Hit at 1", "Hit at 3"], rows, num=(1, 2, 3, 4),
+           caption="Embedding model: " + R.chunk.model + ". Measured by scripts/60-bench.sh chunking."))
+@end
+
+The result that drove the design is not in the hit columns. With fixed-size chunks the system returned the right runbook and an empty remediation. A 600-character chunk begins in one section and ends in the next, so its label is whichever heading the pattern finds first, and for several runbooks no chunk ended up labelled "Remediate". Retrieval quality was fine and the pipeline was broken. Cutting at section boundaries first is what fixed it. How to notice next time: test the field that the next stage reads, not only the ranking.
+
+The second finding is less comfortable. Prefixing each chunk with the title and match line, a common recommendation, lowered hits at 1 from {{chk("one chunk per section").hit_at_1}} to {{chk("per section + title").hit_at_1}}. A likely reason is that the prefix makes all five chunks of a runbook resemble each other and resemble any query that shares a word with the title, which blurs exactly the distinction that the Recognise section alone made sharply. The shipped index does use the prefix, and in the real pipeline, with the symptom filter, the right runbook ranked first in {{R.dec.retrieval_top1}} of {{R.dec.known}} cases and was among the candidates in {{R.dec.retrieval_recall}} of {{R.dec.known}}. Since the grader sees three candidates, the pipeline depends on the hit at 3, which is {{chk("per section + title").hit_at_3}} of {{chk("per section + title").of}} for every variant. So the prefix costs nothing measurable end to end on this corpus, and it earns nothing either. On a larger corpus, <code>ingest.mjs --no-header</code> is the variant to measure first.
+
+### s-embed | Embedding on a CPU
+
+@code ts/src/rag/embed.ts :: private load(): Promise<any> :: ^    return out; +1
+
+<dl class="walk">
+<dt><code>this.extractor ??= import("@huggingface/transformers").then(...)</code></dt>
+<dd>The embedding library is imported on first use, not when the file is loaded. A process that never embeds does not pay for the ONNX runtime, which costs {{cs("import: @huggingface/transformers").p50_ms|.0f}} ms to import (((s-imports))). The <code>??=</code> stores the promise, not the result, so two concurrent first calls share one load.</dd>
+<dt><code>t.pipeline("feature-extraction", this.model, { dtype: "q8" })</code></dt>
+<dd>The model is [[minilm|all-MiniLM-L6-v2]], a small sentence encoder that maps a text to 384 numbers. <code>q8</code> selects the variant whose weights are stored as 8-bit integers: 23 MB on disk, and fast enough on a CPU that the benchmark measured a median of {{R.dec.latency_ms.embed_p50}} ms per query.</dd>
+<dt><code>for (let i = 0; i &lt; texts.length; i += 16)</code></dt>
+<dd>Documents are embedded sixteen at a time. A batch is faster than sixteen single calls and keeps memory bounded on a large corpus.</dd>
+<dt><code>{ pooling: "mean", normalize: true }</code></dt>
+<dd>The model produces one vector per token. Mean pooling averages them into one vector per text. Normalising scales that vector to length 1, after which the cosine similarity of two texts is simply their dot product. The search below depends on that.</dd>
+</dl>
+
+### s-search | Vector search, sized to the problem
+
+@code ts/src/rag/store.ts :: memory ??= JSON.parse :: ^}
+
+<dl class="walk">
+<dt><code>memory ??= JSON.parse(readFileSync(INDEX_PATH, "utf8"))</code></dt>
+<dd>The index is one JSON file with {{chk("per section + title").chunks}} chunks and their vectors, read once and kept in memory.</dd>
+<dt><code>if (chunk.kind !== kind || (symptom &amp;&amp; !chunk.symptoms.includes(symptom))) return;</code></dt>
+<dd>The filter runs before any arithmetic. A structured fact, the symptom that Kubernetes reported, removes most runbooks from consideration. Similarity is only asked to rank what remains. When a fact is available as a field, filter on the field and let the embedding handle what only text can say.</dd>
+<dt><code>dot += (v[j] ?? 0) * (queryVector[j] ?? 0);</code></dt>
+<dd>Cosine similarity as a dot product, valid because both vectors are normalised. For 40 chunks of 384 numbers this loop is about fifteen thousand multiplications.</dd>
+<dt><code>hits.sort(...).slice(0, k)</code></dt>
+<dd>An exact search: every chunk is compared. At this size an approximate index would be slower to set up than the scan is to run.</dd>
+</dl>
+
+The same function has a second branch that uses [[qdrant|Qdrant]] through LangChain's vector store interface when <code>QDRANT_URL</code> is set, with the same filter expressed as a payload condition. That branch was type-checked and was not run for this tutorial. A vector database starts to pay when the corpus no longer fits a linear scan or when several processes must share one index; neither is true here, and an unused database is one more thing to keep running.
+
+### s-graph | The graph: retrieve, grade, compose
+
+[[langgraph|LangGraph]] models a computation as nodes that read and update a shared state, with edges that say what runs next. Three steps and one branch are a small graph, and the benefit at this size is modest but real: the state is declared in one place, the branch is data, and each node is an ordinary function that a test can call.
+
+@code ts/src/rag/graph.ts :: async function grade(s: S) :: ^}
+
+<dl class="walk">
+<dt><code>if (s.symptom &amp;&amp; s.candidates.length === 1) return { ..., probability: 1, via: "structural" };</code></dt>
+<dd>If exactly one runbook is filed under the symptom, there is nothing to choose. Kubernetes has already named the fault in a status field, and asking a model could only add doubt to a fact. In the labelled set {{R.dec.structural}} of {{R.dec.known}} known cases are decided here, with no model call.</dd>
+<dt><code>for (const c of s.candidates) criteria[c.id] = c.match;</code></dt>
+<dd>The options are built from the candidates: runbook id as the key, match line as the description.</dd>
+<dt><code>criteria.none = "None of these";</code></dt>
+<dd>The way out, and the reason novel faults come back unmatched.</dd>
+<dt><code>const picked = s.candidates.find((c) =&gt; c.id === a.choice) ?? null;</code></dt>
+<dd>If the model chose "none", nothing is found and <code>picked</code> is null. The same line also protects against a model that returns a key that was never offered.</dd>
+<dt><code>via: picked &amp;&amp; picked.id === s.candidates[0]?.id ? "model+retrieval" : "model"</code></dt>
+<dd>Two independent readers looked at the incident: the embedding ranked the candidates and the decision model chose one. <code>via</code> records whether they named the same runbook. It is not used by the policy; it is in every record so that a person can see when the two disagreed.</dd>
+<dt><code>probability: picked ? (a.probabilities[picked.id] ?? 0) : 0</code></dt>
+<dd>The winner's share of the distribution, which the policy compares with its threshold.</dd>
+</dl>
+
+@code ts/src/rag/graph.ts :: export const ragGraph :: \.compile\(\)
+
+<dl class="walk">
+<dt><code>.addEdge(START, "retrieve").addEdge("retrieve", "grade")</code></dt>
+<dd>Unconditional edges: every query is retrieved and graded.</dd>
+<dt><code>.addConditionalEdges("grade", (s) =&gt; (s.picked ? "compose" : END), ["compose", END])</code></dt>
+<dd>The one branch. With a match the graph continues to <code>compose</code>, which fetches the Remediate section of the chosen runbook. Without one it ends, and no further search is made. The array lists the possible targets so that the graph can be validated when it is compiled.</dd>
+<dt><code>.compile()</code></dt>
+<dd>Checks the graph and returns something with an <code>invoke</code> method. The cost of this convenience is import time: {{cs("import: @langchain/langgraph").p50_ms|.0f}} ms for the package on the test machine, which matters to how the retrieval agent is deployed (((s-services))).</dd>
+</dl>
+
+### s-a2a-rag | A graph becomes an agent
+
+The reflex agents and the reason agent both need this graph, they are separate processes, and one of them is built with a different framework. [[a2a|A2A]] is the protocol for that situation: an agent publishes a card that describes it at a well-known URL and accepts messages over JSON-RPC.
+
+@code ts/src/rag/a2a.ts :: class RunbookExecutor :: bus.finished\(\); +1
+
+<dl class="walk">
+<dt><code>const text = ctx.userMessage.parts.map(...).join("\n").trim();</code></dt>
+<dd>An A2A message is a list of parts. Only text parts are used here.</dd>
+<dt><code>try { const parsed = JSON.parse(text); if (typeof parsed?.query === "string") request = parsed; }</code></dt>
+<dd>The agent accepts two kinds of caller with one endpoint. A program sends a JSON object with a query and a symptom. A language model, calling this agent as a tool, sends a sentence. If the text is not JSON, the whole text is the query.</dd>
+<dt><code>request.mode === "docs" ? await searchDocs(...) : await findRunbook(...)</code></dt>
+<dd>Two skills: find the runbook for an incident, or search background documentation.</dd>
+<dt><code>bus.publish(reply); bus.finished();</code></dt>
+<dd>The answer is a single message, and the task is finished at once. A2A also supports long-running tasks with status updates; a lookup that takes half a second does not need them.</dd>
+</dl>
+
+The server refuses requests that lack a bearer token, except for the card and the health check. That code is shared with the reason agent and is covered in ((s-tokens)).
+
+### s-quiz-rag | Check
+
+@quiz
+? Fixed 600-character chunks retrieved the right runbook almost as often as per-section chunks. Why were they rejected?
+- They were slower to embed :: Embedding time was not the issue. They had fewer chunks to embed than the per-section variants.
++ No chunk carried the label "Remediate" for several runbooks, so the next stage returned an empty remediation :: The ranking was fine and the pipeline was broken. A chunk that straddles two sections can only have one label.
+- The splitter cannot handle Markdown :: It handles Markdown; it simply cuts where the size limit falls.
+? Why is the symptom applied as a filter before similarity search, and not left to the embedding?
++ It is a fact that Kubernetes reported in a field, so it should restrict the candidates exactly, leaving similarity to rank what only text can distinguish :: An embedding might rank an OOM runbook highly for a crash log that mentions memory. The filter makes that impossible when the status says the pod was not OOM-killed.
+- Embeddings cannot represent the word OOMKilled :: They can; the point is that an exact field should not be approximated.
+- Filtering makes the dot product more accurate :: The arithmetic is the same. Only the set of chunks it runs over changes.
+? What does <code>via: "model"</code> (without "+retrieval") in a record tell the person reading it?
+- The model was called twice :: It was called once.
+- Retrieval found no candidates :: Then the result would be "none".
++ The decision model picked a runbook that the embedding had not ranked first :: The two readers disagreed. The policy still follows the model, but a disagreement is a good place to look when reviewing records.
+@end

@@ -1,0 +1,52 @@
+# Where the agents live and exactly what they may touch.
+apiVersion: v1
+kind: Namespace
+metadata: {name: oncall}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: kube-ops, namespace: oncall}
+---
+# In the watched namespace: read pods, logs, events and rollout objects;
+# patch deployments. No delete, no create, no secrets, no exec. A prompt
+# cannot grant a verb that this Role does not list.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: oncall-triage, namespace: trading}
+rules:
+- apiGroups: [""]
+  resources: [pods, pods/log, events]
+  verbs: [get, list, watch]
+- apiGroups: [apps]
+  resources: [deployments, replicasets]
+  verbs: [get, list, watch]
+- apiGroups: [apps]
+  resources: [deployments]
+  verbs: [patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: oncall-triage, namespace: trading}
+subjects: [{kind: ServiceAccount, name: kube-ops, namespace: oncall}]
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: oncall-triage
+---
+# In its own namespace: leases, so two agents never work one incident.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: oncall-leases, namespace: oncall}
+rules:
+- apiGroups: [coordination.k8s.io]
+  resources: [leases]
+  verbs: [get, create, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: oncall-leases, namespace: oncall}
+subjects: [{kind: ServiceAccount, name: kube-ops, namespace: oncall}]
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: oncall-leases

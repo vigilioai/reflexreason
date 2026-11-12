@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sift",
+    "crates/intake",
+    "crates/vllm-gate",
+    "crates/rusage",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+
+# Size and start-up matter more than build time for these binaries.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

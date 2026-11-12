@@ -1,0 +1,41 @@
+# The shared reflex brain: one CPU pod answers typed questions for every agent.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: decision, namespace: oncall, labels: {app: decision}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: decision}}
+  template:
+    metadata: {labels: {app: decision}}
+    spec:
+      containers:
+      - name: von
+        image: rr-decision:1.0
+        imagePullPolicy: IfNotPresent
+        ports: [{containerPort: 8100}]
+        # /health answers 2.6 s after start, but the weights load on the first
+        # question: measured 6 s with a warm page cache and 157 s from a cold
+        # disk. So "started" is defined as "has answered one real question",
+        # which also performs the load before any agent is kept waiting.
+        startupProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - |
+              import json, urllib.request as u
+              body = {"state": "warm-up", "questions": {"q": {"type": "noul", "instructions": "Is this a warm-up?"}}}
+              u.urlopen(u.Request("http://127.0.0.1:8100/v1/systemone", json.dumps(body).encode(),
+                                  {"content-type": "application/json"}), timeout=280)
+          periodSeconds: 10
+          timeoutSeconds: 290
+          failureThreshold: 3
+        readinessProbe: {httpGet: {path: /health, port: 8100}, periodSeconds: 5}
+        resources: {requests: {cpu: "1", memory: 3Gi}, limits: {memory: 4Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: decision, namespace: oncall}
+spec:
+  selector: {app: decision}
+  ports: [{port: 8100, targetPort: 8100}]

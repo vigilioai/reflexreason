@@ -1,0 +1,6 @@
+{
+ "image": "rr-agents:1.0",
+ "size_reported_by_docker": "1.55GB",
+ "node_modules_layer": "804MB",
+ "note": "first image build, before build.sh removed the other platforms, the GPU providers and the browser builds of onnxruntime"
+}

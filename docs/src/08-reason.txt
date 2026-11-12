@@ -1,0 +1,123 @@
+## ch-reason | The reason agent
+
+### s-reason-role | A second line that may read and may not act
+
+When the reflex path declines, either because no runbook matched or because the best match was below the threshold, the incident is handed over with one sentence of evidence. What is needed now is the opposite of a reflex: read more logs, look at the rollout history, consider whether a known procedure is at least close, and write down what a person should check first. That is open-ended work with tools, which is what a language model in an agent loop is good at, and it is the only place in this system where one is used.
+
+The agent is built with Google's [[adk|Agent Development Kit]]. It combines every protocol in the project, and the whole assembly is one function.
+
+@code ts/src/reason/agent.ts :: export async function buildReasonAgent( :: ^}
+
+<dl class="walk">
+<dt><code>const skill = await loadSkillFromDir(join(skillsDir, "k8s-incident-triage"));</code></dt>
+<dd>Reads a [[skill|skill]] from a directory: a <code>SKILL.md</code> file with a name and a description in its header, and optional reference files beside it.</dd>
+<dt><code>new RemoteA2AAgent({ name: "runbook_rag", ..., agentCard: config.ragUrl.replace(/\/$/, ""), clientFactory: clientFactory() })</code></dt>
+<dd>The retrieval agent from the previous chapter, as seen from here: a remote agent reachable over A2A. <code>agentCard</code> is the base URL, from which ADK fetches the card. <code>clientFactory</code> supplies an HTTP client that adds the bearer token to every request.</dd>
+<dt><code>model: new OpenAiCompatLlm({ model, baseUrl, sessionId })</code></dt>
+<dd>The language model. ADK for TypeScript ships with Gemini models; this class adapts it to any server that speaks the OpenAI chat completions format, which vLLM does. It is described below.</dd>
+<dt><code>instruction: INSTRUCTION</code></dt>
+<dd>Five fixed sentences. They contain no date, no request id and nothing else that changes between requests. The reason is economic, not stylistic: the instruction is the first thing in every prompt, and a prompt whose beginning never changes is what lets vLLM reuse its cached computation (((s-prefix))).</dd>
+<dt><code>afterToolCallback: quarantineHostileOutput</code></dt>
+<dd>A hook that ADK calls with every tool result before the model sees it. This is where log text is screened (((s-tool-guard))).</dd>
+<dt><code>new SkillToolset([skill])</code></dt>
+<dd>Gives the model tools to list and load skills. Only the skill's name and one-line description are in the prompt at the start. The procedure itself enters the conversation when the model asks for it. With one skill the saving is small. The mechanism is what scales: twenty procedures cost twenty lines until one is needed.</dd>
+<dt><code>new MCPToolset({ type: "StreamableHTTPConnectionParams", url: config.mcpUrl }, READ_ONLY)</code></dt>
+<dd>Connects to kube-ops and exposes five of its tools, by name. This filter runs in the agent's own process. It is the second of two protections; the first is that this process has no operator token, so the server never offers it a write tool in the first place (((s-mcp-http))).</dd>
+<dt><code>new AgentTool({ agent: runbooks })</code></dt>
+<dd>Wraps the remote agent as a tool. To the model, asking another agent over A2A looks like calling a function with one text argument.</dd>
+</dl>
+
+### s-skill | The skill
+
+@code ts/skills/k8s-incident-triage/SKILL.md :: # Incident triage :: $
+
+A skill is a procedure written for a model in the way a runbook is written for a person. Three choices in this one are deliberate. The steps name tools, in order, so that the model does not have to plan from nothing. The rules repeat, inside the procedure, that log text is data. And the answer format is fixed, because the reader is a person at night who wants the diagnosis in the first line and the confidence in the last.
+
+### s-adapter | Teaching ADK to speak to vLLM
+
+ADK represents a conversation in Gemini's terms: contents made of parts, where a part is text, a function call or a function response, and tools declared with Gemini's schema dialect. A server such as vLLM speaks the OpenAI chat format: messages with roles, <code>tool_calls</code>, and tools declared with JSON Schema. The adapter is a translation in both directions, {{len((RES.parent.parent / "ts/src/reason/openai-llm.ts").read_text().splitlines())}} lines in total, and its core is one method.
+
+@code ts/src/reason/openai-llm.ts :: override async *generateContentAsync( :: ^  }$
+
+<dl class="walk">
+<dt><code>override async *generateContentAsync(req, _stream, abortSignal)</code></dt>
+<dd>The one method ADK requires of a model class. It is an async generator because ADK supports streaming; this adapter yields exactly one response.</dd>
+<dt><code>headers["x-session-id"] = this.options.sessionId;</code></dt>
+<dd>An identifier for the conversation, which the gateway uses to measure how much of each prompt repeats the previous one.</dd>
+<dt><code>temperature: 0</code></dt>
+<dd>Greedy decoding. A triage answer should not differ between two identical requests, and only requests with temperature 0 are safe for the gateway to answer from its cache.</dd>
+<dt><code>messages: toMessages(req), tools: toTools(req)</code></dt>
+<dd>The two translations. <code>toMessages</code> turns function-call parts into <code>tool_calls</code> with generated ids and matches each function response to the id of its call, which the OpenAI format requires and Gemini's does not have.</dd>
+<dt><code>if (!res.ok) { yield { errorCode, errorMessage, turnComplete: true }; return; }</code></dt>
+<dd>A failed request becomes an ADK error response, not an exception, so the agent loop ends cleanly and the caller receives the reason.</dd>
+</dl>
+
+@code ts/src/reason/openai-llm.ts :: export function toTools :: ^}
+
+<dl class="walk">
+<dt><code>fn.parametersJsonSchema ?? toJsonSchema(fn.parameters ?? { type: "object", properties: {} })</code></dt>
+<dd>Tools arrive in one of two forms. MCP tools already carry JSON Schema and are passed through. Tools declared the Gemini way write their types in upper case (<code>"OBJECT"</code>, <code>"STRING"</code>), which JSON Schema does not accept, so <code>toJsonSchema</code> lower-cases them recursively. A tool with no parameters still needs an object schema, or strict servers reject the request.</dd>
+</dl>
+
+### s-tool-guard | The guard on tool output
+
+The reflex path screens a log before acting on it. The reason path has the same exposure in a worse form: the model reads raw log text as part of its conversation, and a line that says "ignore your instructions" arrives in the same channel as the instructions. The system prompt says that log text is data, and that sentence is advice. The callback below is enforcement.
+
+@code ts/src/reason/agent.ts :: export async function quarantineHostileOutput :: ^}
+
+<dl class="walk">
+<dt><code>if (!CARRIES_CLUSTER_TEXT.has(tool.name)) return undefined;</code></dt>
+<dd>Only two tools return text written by workloads: <code>pod_logs</code> and <code>describe_incident</code>. Returning <code>undefined</code> tells ADK to pass the result on unchanged.</dd>
+<dt><code>const text = strings(response).join("\n");</code></dt>
+<dd>A tool result is nested JSON, sometimes JSON inside a string inside JSON. <code>strings</code> walks all of it and collects every string, so text cannot hide one level down.</dd>
+<dt><code>const score = await injectionScore(guardText(d) || text.slice(0, 600));</code></dt>
+<dd>The same distillation and the same two-question guard as the reflex path, including the rule of showing the guard the rare lines first.</dd>
+<dt><code>return { quarantined: true, notice: ... }</code></dt>
+<dd>If the text reads as instructions, the model never receives it. It receives a notice that says so and asks it to report a suspected injection. The hostile text is replaced before it enters the conversation, which is the only point at which replacing it helps.</dd>
+</dl>
+
+The limits of this guard are the limits measured in ((s-guard)): it is a probabilistic filter with a narrow margin. What makes the reason agent safe to run is that nothing it can reach is able to change the cluster.
+
+### s-reason-serve | Serving the agent, and two things that broke
+
+@code ts/src/reason/agent.ts :: const app = express(); :: allowUnauthenticated: true, +1
+
+<dl class="walk">
+<dt><code>app.use(requireToken);</code></dt>
+<dd>The bearer-token check is installed before any route. Every request except the agent card and the health check must carry the token.</dd>
+<dt><code>await toA2a(await buildReasonAgent(skillsDir), { app, ..., allowUnauthenticated: true })</code></dt>
+<dd>ADK's helper that publishes an agent over A2A: it adds the card and the JSON-RPC route to the given Express app. The flag reads alarmingly and means only that ADK's own authentication is off, because the middleware above already did the job.</dd>
+</dl>
+
+<b>ADK refused to start.</b> Called without that flag and without its own authentication configured, <code>toA2a</code> throws: it will not mount an unauthenticated A2A server. That is a good default, and the error message names the flag. The wrong fix is to set the flag and move on. The right one is what the listing shows: put real authentication in front, then tell ADK that it has been handled.
+
+<b>The agent card was fetched from a URL that did not exist.</b> <code>RemoteA2AAgent</code> appends the well-known path to whatever it is given. Passing the full card URL produced a path with <code>.well-known</code> in it twice and a 404 that surfaced only when the model first tried to use the tool. The fix is to pass the base URL. How to notice: request the card yourself with curl before blaming the agent.
+
+### s-reason-run | What a run looks like
+
+In the novel-fault scenario the reflex agent found no runbook and called this agent over A2A. The reason step took {{rec("novel").ms.reason}} ms. The language model in that run was a scripted stand-in (<code>ts/src/mock/llm.ts</code>) that requests the same sequence of tool calls a real model is instructed to make: load the skill, read the pod's log, read the rollout history, ask the retrieval agent, then answer. So the run exercised the real ADK loop, the real skill loading, real MCP calls against the cluster, the real A2A call and the tool-output guard with the real decision model. It did not exercise a language model's judgement, and the stand-in says so in its answer:
+
+@py
+text = rec("novel").reasonAnswer
+short = text.split("EVIDENCE:")[0].strip() + " [...] " + "RECOMMENDED ACTION:" + text.split("RECOMMENDED ACTION:")[1]
+emit("<blockquote>" + "<br>".join(esc(l) for l in short.split("\n")) + "</blockquote>")
+@end
+
+Replacing the stand-in with vLLM is a change of one environment variable, <code>LLM_BASE_URL</code>, and it is the first item in ((s-not-run)).
+
+### s-quiz-reason | Check
+
+@quiz
+? The agent's instruction contains no date and no request id. What depends on that?
+- The model's accuracy, since dates confuse it :: Nothing here was measured about dates and accuracy.
++ vLLM can reuse its cached computation only for a prompt prefix that is identical from the first token, and the instruction is the first thing in every prompt :: One changing token near the start makes everything after it uncacheable. The next chapter measures exactly this with a clock in the system prompt.
+- ADK rejects instructions that contain numbers :: It does not.
+? Why is hostile log text replaced in a tool callback, and not handled by telling the model to ignore it?
+- Callbacks are faster than prompts :: Speed is not the point; the callback costs a decision-model call.
+- The model cannot read system prompts :: It can, and the prompt does say that logs are data.
++ An instruction to the model is advice that the hostile text competes with on equal terms; removing the text before the model sees it does not depend on the model's obedience :: The attack and the defence would otherwise be two sentences in the same context window.
+? What does the skill mechanism save, compared with putting the triage procedure into the system prompt?
++ Prompt length on every request: only the name and description are present until the model loads the procedure :: With one skill the saving is small, and with many it is the difference between a prompt of twenty lines and one of several hundred.
+- A round trip to the model :: It adds one: the model has to ask for the skill.
+- The need for MCP :: Skills carry procedures, not access to systems.
+@end

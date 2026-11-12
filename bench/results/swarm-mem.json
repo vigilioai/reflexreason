@@ -1,0 +1,55 @@
+{
+ "idle_rss_mb": 80.4,
+ "idle_heap_mb": 11.2,
+ "node": "v22.23.4",
+ "rows": [
+  {
+   "agents": 1,
+   "wall_ms": 2156,
+   "incidents_per_s": 0.5,
+   "acted": 1,
+   "rss_before_mb": 80.4,
+   "rss_peak_mb": 81.1,
+   "heap_before_mb": 11.2,
+   "heap_peak_mb": 12.7,
+   "heap_kb_per_agent": 1523.4,
+   "rss_kb_per_agent": 640
+  },
+  {
+   "agents": 10,
+   "wall_ms": 2385,
+   "incidents_per_s": 4.2,
+   "acted": 10,
+   "rss_before_mb": 81.2,
+   "rss_peak_mb": 85.4,
+   "heap_before_mb": 11.6,
+   "heap_peak_mb": 15.8,
+   "heap_kb_per_agent": 429.3,
+   "rss_kb_per_agent": 435.2
+  },
+  {
+   "agents": 100,
+   "wall_ms": 3845,
+   "incidents_per_s": 26,
+   "acted": 100,
+   "rss_before_mb": 85.6,
+   "rss_peak_mb": 121.5,
+   "heap_before_mb": 12.1,
+   "heap_peak_mb": 36.5,
+   "heap_kb_per_agent": 249.9,
+   "rss_kb_per_agent": 368.2
+  },
+  {
+   "agents": 1000,
+   "wall_ms": 15765,
+   "incidents_per_s": 63.4,
+   "acted": 1000,
+   "rss_before_mb": 121.5,
+   "rss_peak_mb": 311.6,
+   "heap_before_mb": 13.8,
+   "heap_peak_mb": 208.1,
+   "heap_kb_per_agent": 198.9,
+   "rss_kb_per_agent": 194.6
+  }
+ ]
+}

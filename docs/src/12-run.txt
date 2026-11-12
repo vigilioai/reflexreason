@@ -1,0 +1,131 @@
+## ch-run | Running it on your machine
+
+### s-run-order | The order of things
+
+@pre
+# 0. what is installed, and what each missing piece is for
+scripts/00-prereqs.sh
+
+# 1. build and test everything
+./build.sh
+
+# 2. a single-node cluster (installs k3s as a system service)
+YES=1 scripts/10-k3s-up.sh
+kubectl apply -f deploy/scenarios/trading.yaml \
+              -f deploy/k8s/00-oncall-rbac.yaml
+
+# 3. CPU only: the decision model and the agents as local processes
+pip install 'von-sdk>=1.3.7'
+von serve --host 127.0.0.1 --port 8100 --device cpu --model von-1.3 &
+ACTION_BUDGET=100 MOCK_LLM=1 scripts/40-dev-up.sh &
+scripts/45-door-check.sh > bench/results/door.json
+scripts/50-eval.sh
+
+# 4. the numbers of this tutorial on your hardware, and this page from them
+scripts/60-bench.sh
+scripts/61-systemone-example.sh
+scripts/65-record-build.sh                  # needs Docker
+SAM=sam scripts/70-sam-local.sh 10 > bench/results/sam-local.json
+python3 docs/build_tutorial.py
+
+# 5. with the GPU: fetch the model, then everything as pods
+scripts/15-fetch-model.sh
+GPU=1 scripts/20-deploy.sh
+scripts/55-incluster-check.sh > bench/results/incluster.json
+@end
+
+Steps 0 to 4 need no GPU. Step 3 is the configuration every reflex-path number in this tutorial was measured in: the agents as local processes that reach a real cluster through the ServiceAccount's identity. After step 4 the generated page shows your machine's numbers in the benchmark, scenario and door tables, and the generator stops if a result file is missing.
+
+Four result files are not rewritten by those steps. <code>von.json</code> and <code>von-warm.json</code> come from <code>bench/von.py</code>, which stops and restarts the decision server to time its start, so it is run on its own. <code>coldstart-python-harness.json</code>, <code>gate-before-nodelay.json</code> and <code>images-before-trim.json</code> are records of earlier states of this project, kept as the evidence for the three stories of things that went wrong. <code>repro.json</code> records the reproducibility check described in ((s-build-broke)).
+
+Step 2 changes the machine, so the script refuses to run without <code>YES=1</code>. Read it first. It was written from the k3s documentation, and the test cluster for this tutorial was started by hand from the same k3s release, not by that script.
+
+### s-gpu-first | The first hour with the GPU
+
+Three questions should be answered in this order, because each one decides whether the next is worth asking.
+
+Does it fit and start? After <code>GPU=1 scripts/20-deploy.sh</code>, watch <code>kubectl -n oncall get pods -w</code> and <code>nvidia-smi</code>. The pod has fifteen minutes to become ready. If vLLM stops with an out-of-memory error, lower <code>--max-model-len</code> or <code>--max-num-seqs</code> in <code>deploy/k8s/20-llm.yaml</code>; the values there were calculated for 12 GB, not observed.
+
+Does the model call tools? Run <code>scripts/30-inject.sh novel</code> and read the swarm's record. The <code>reasonAnswer</code> should be a diagnosis that quotes the license error, and the reason agent's log should show calls to <code>load_skill</code>, <code>pod_logs</code> and <code>rollout_history</code>. If the answer contains tool calls as text, the parser flags do not match the model.
+
+Is the prefix cache being fed? <code>scripts/63-bench-vllm-prefix.sh</code> plays a session with shuffled tools directly and through the gateway and prints vLLM's own cache counters for each. The gateway's worth is the difference between those two hit rates.
+
+@if R.incluster
+### s-incluster | The same system as pods
+
+The agents were also deployed into the test cluster as pods, with the decision model in its own pod and the network policies applied: the images from <code>build.sh</code> and <code>deploy/docker/decision.Dockerfile</code>, the manifests in <code>deploy/k8s/</code>. <code>scripts/55-incluster-check.sh</code> then injected one fault and watched.
+
+@py
+x = R.incluster
+r = x.record
+rows = [
+ ("Pods ready", f"{sum(1 for p in x.pods if p.ready)} of {len(x.pods)}"),
+ ("Fault injected", x.fault),
+ ("Handled by", esc(r.handled_by) if r else "no record"),
+ ("Runbook and action", (f"{r.runbook} (p={r.runbookProbability:.2f}), {r.action.replace('_', ' ')}" if r else "")),
+ ("Executed and recovered", (f"{r.executed} and {r.recovered}" if r else "")),
+ ("Handling time", (f"{r.ms.total / 1000:.1f} s" if r else "")),
+ ("Injection to finished record", f"{x.seconds_from_injection_to_record} s"),
+ ("Leases", esc(", ".join(x.leases))),
+]
+emit(table(["In-cluster check", "Result"], rows))
+@end
+
+Two dispatcher pods were running. One of them holds the Lease named after the workload, and that one produced the record. The handling time is longer than with local processes because the decision model's pod was limited to the CPU its manifest requests while sharing two cores with everything else.
+
+@endif
+### s-not-run | What was not run
+
+@py
+rows = [
+ ("vLLM with Qwen3.5-4B on a 12 GB card: start time, memory fit, tool calling", "no GPU on the test machine", "<code>GPU=1 scripts/20-deploy.sh</code>, then the three questions above"),
+ ("A real language model's judgement in the reason path", "the model was a scripted stand-in", "<code>scripts/30-inject.sh novel</code> with vLLM running"),
+ ("The gateway's effect on vLLM's prefix cache, in vLLM's counters", "needs vLLM", "<code>scripts/63-bench-vllm-prefix.sh</code>"),
+ ("Cold starts on AWS Lambda itself", "needs an AWS account; creates billable resources", "<code>YES=1 scripts/72-sam-aws-coldstart.sh</code>"),
+ ("<code>scripts/10-k3s-up.sh</code>", "installs a system service", "read it, then <code>YES=1 scripts/10-k3s-up.sh</code>"),
+ ("The Qdrant branch of the vector store", "not needed at 40 chunks", "set <code>QDRANT_URL</code>, rerun ingest and <code>scripts/60-bench.sh chunking</code>"),
+ ("The decision model under OpenVINO, as its model card benchmarks it", "stock PyTorch was used", "the model card's instructions"),
+]
+if R.incluster:
+    rows.append(("All ten scenarios, and the reason path, with the agents as pods", "in-cluster, one fault was injected and checked; the ten scenarios ran with local processes, and the reason path needs the vLLM pod", "<code>GPU=1 scripts/20-deploy.sh</code>, then <code>scripts/30-inject.sh</code> for each fault"))
+else:
+    rows.append(("The agents and the decision model as pods, and NetworkPolicy enforcement", "the manifests passed a server-side dry run only", "<code>scripts/20-deploy.sh</code>, then <code>scripts/55-incluster-check.sh</code>"))
+    rows.append(("The decision model's container image", "its build downloads PyTorch, and the image builder on the test machine has no outbound network; the build was attempted and stopped at that step", "<code>docker build -f deploy/docker/decision.Dockerfile -t rr-decision:1.0 .</code>"))
+emit(table(["Not run", "Why", "How to close the gap"], rows))
+@end
+
+Everything else described on this page was executed, and the result files it produced are in the package.
+
+### s-your-calls | Four decisions that are yours
+
+@py
+emit(table(["Decision", "Recommended", "Why, and what would change it"], [
+ ("Keep Von 1.3 as the decision model?",
+  "Yes for this demo; plan a replacement for anything long-lived",
+  "Its repository is archived and the weights will not change, which makes every number here reproducible. The wire format is shared by other decision models, so the swap is a URL. Thresholds and option wording must be refitted on a swap; <code>scripts/60-bench.sh decisions</code> is the refit."),
+ ("Prefix chunks with the runbook title?",
+  "Keep the default on this corpus; measure <code>--no-header</code> first on a larger one",
+  inline("It cost two hits at 1 in the filter-free benchmark and nothing end to end (((s-chunk))).")),
+ ("First deployment on a real cluster",
+  "<code>SHADOW=1</code> for the first weeks",
+  "Every decision is made and recorded and nothing is changed. The records become the labelled set that the thresholds should really be chosen on."),
+ ("One guard question or two?",
+  "Two",
+  inline("Each phrasing alone missed one injected line in four. The second question costs about half of the decide step (((s-latency))); drop it only with evidence from your own attack set.")),
+]))
+@end
+
+The language model could in principle also run without a GPU: the model's vLLM recipe lists one Xeon 6 NUMA node as an alternative to a 16 GB card. That was not tried, and nothing in the reflex path would notice the difference.
+
+### s-quiz-run | Check
+
+@quiz
+? After running the benchmarks on your own machine, how do you know that the page shows your numbers and not the ones it shipped with?
+- The page prints a warning when numbers are old :: It has no notion of old.
++ Every number is an expression evaluated against the result files at build time, and the build fails if a file is missing :: The text contains no measured number typed by hand. Rebuild the page after the benchmarks and the tables are yours.
+- The numbers are stored in the HTML template :: There is no template with numbers; the sources contain expressions.
+? vLLM starts, and the reason agent's answer contains a tool call written out as text. What is wrong?
+- The MCP server is unreachable :: Then the tool call would fail, not appear as text.
+- The decision model's threshold is too high :: The decision model is not involved in parsing the language model's output.
++ The tool-call parser flag does not match the model, so vLLM returned the call inside the message text instead of as a structured tool call :: The agent loop only acts on structured tool calls. The parser is what turns the model's raw output into them.
+@end

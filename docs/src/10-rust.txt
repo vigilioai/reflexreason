@@ -1,0 +1,206 @@
+## ch-rust | Rust or TypeScript: the cold start numbers
+
+### s-cold-method | What was measured, and a harness that lied
+
+A [[cold-start|cold start]] here is the time from asking the operating system to start a program until the program has produced its result and exited: for the intake function, read one 4 KB event from standard input, distil it, print the JSON. The files are already in the page cache, so the measurement is of the program and not of the disk. Each row below is the median of {{cs("intake: Rust binary").runs}} runs for the small programs and {{cs("service: MCP server, load only").runs}} for the services.
+
+The first version of the harness was a Python script that started each program itself and read the child's resource usage from the kernel. Its numbers looked reasonable, and one column was wrong.
+
+@py
+old = {r.name: r for r in R.cold0.rows}
+emit(table(["Program", "Peak memory, first harness", "Peak memory, corrected"], [
+ ("Rust intake binary", f"{old['intake: Rust binary'].peak_rss_mb} MB", f"{cs('intake: Rust binary').peak_rss_mb:.2f} MB"),
+ ("/bin/true", f"{old['floor: /bin/true (process only)'].peak_rss_mb} MB", f"{cs('floor: /bin/true (process only)').peak_rss_mb:.2f} MB"),
+ ("Node bundle", f"{old['intake: Node, esbuild bundle'].peak_rss_mb} MB", f"{cs('intake: Node, esbuild bundle').peak_rss_mb:.2f} MB"),
+], num=(1, 2)))
+@end
+
+A program that does nothing, <code>/bin/true</code>, was reported at {{cs0("floor: /bin/true (process only)").peak_rss_mb}} MB. That is the tell. Linux carries a process's peak memory across <code>exec</code>: the child of a Python script starts life as a copy of the Python interpreter, and the high-water mark it reached in that moment stays on its account after it becomes another program. Every small program was being reported at Python's size. The Node figures were right only because Node is larger than Python.
+
+The fix is the third Rust program in the package, and it is in the measurement tooling, not in the product.
+
+@code rust/crates/rusage/src/main.rs :: let t0 = Instant::now(); :: let cpu_us
+
+<dl class="walk">
+<dt><code>let t0 = Instant::now(); let status = Command::new(...).status(); let wall_us = t0.elapsed().as_micros();</code></dt>
+<dd>The helper starts the program, waits for it and takes the wall time itself. Nothing in that interval is Python. For a program that runs for half a millisecond, the scripting language's own process handling had been a visible share of the measurement.</dd>
+<dt><code>libc::getrusage(libc::RUSAGE_CHILDREN, &amp;mut ru)</code></dt>
+<dd>Asks the kernel what the finished child consumed: peak resident memory and CPU time in user and kernel mode. The helper has exactly one child, so the answer is that child's.</dd>
+<dt><code>ru.ru_maxrss</code></dt>
+<dd>Peak resident memory in kilobytes. The inherited floor is now the helper's own footprint. The helper is built static, so that floor is small, and running <code>/bin/true</code> through it shows how small: {{cs("floor: /bin/true (process only)").peak_rss_mb|.2f}} MB.</dd>
+</dl>
+
+@code bench/coldstart.py :: def run_once(cmd, stdin_bytes, env, cwd): :: ^        out,$ +1
+
+<dl class="walk">
+<dt><code>[RUSAGE, "--fd", str(report_w)] + cmd</code> with <code>pass_fds=[report_w]</code></dt>
+<dd>The script starts the helper, the helper starts the program. The helper writes its one-line report to a pipe of its own, passed by number, so the report cannot mix with the program's output.</dd>
+<dt><code>os.write(stdin_w, stdin_bytes); os.close(stdin_w)</code></dt>
+<dd>The event goes to the program's standard input, which the helper leaves untouched, and the pipe is closed so that the program sees the end of input.</dd>
+<dt><code>out = p.stdout.read()</code></dt>
+<dd>The program's output is kept. Each row stores a digest of it, and the rows for the Rust and TypeScript intake show the same digest: the two were timed doing identical work.</dd>
+</dl>
+
+How to notice this class of error: include a control that should measure nothing. <code>/bin/true</code> at {{cs0("floor: /bin/true (process only)").peak_rss_mb}} MB was in the first results file from the start. It was the baseline row, and nobody questions a baseline until the number is absurd.
+
+### s-intake-cold | One function, two languages
+
+@py
+names = [
+ ("intake: Rust binary, static musl (the Lambda artefact)", "Rust, static (the Lambda artefact)", 0),
+ ("intake: Rust binary", "Rust, dynamically linked", 0),
+ ("intake: Node, esbuild bundle", "Node, esbuild bundle", 1),
+ ("intake: Node, bundle + compile cache", "Node, bundle + compile cache", 1),
+ ("intake: Node, tsc output (2 files)", "Node, tsc output (2 files)", 1),
+ ("floor: node -e '' (runtime only)", "node -e '' (empty program)", 2),
+ ("floor: /bin/true (process only)", "/bin/true (empty process)", 2),
+]
+rows = []
+for name, label, _ in names:
+    r = cs(name)
+    size = f"{r.artifact_bytes:,}" if r.artifact_bytes else ""
+    rows.append((label, f"{r.p50_ms:.2f}", f"{r.min_ms:.2f}", f"{r.p90_ms:.2f}", f"{r.cpu_ms:.2f}", f"{r.peak_rss_mb:.2f}", size))
+emit(table(["Program", "Median ms", "Min ms", "p90 ms", "CPU ms", "Peak RSS MB", "File bytes"], rows, num=(1, 2, 3, 4, 5, 6),
+           caption=f"Start, process one {R.cold.event_bytes:,} byte event, exit. {cs('intake: Rust binary').runs} runs each."))
+emit(hbar([(label, cs(name).p50_ms, series) for name, label, series in names], "ms", "{:.2f}",
+          legend=[(0, "Rust"), (1, "TypeScript on Node"), (2, "floor: an empty program")],
+          claim="Median time from process start to result. The empty Node program shows how much of the TypeScript figure is the runtime itself."))
+@end
+
+The static Rust binary finishes in {{cs("intake: Rust binary, static musl (the Lambda artefact)").p50_ms|.2f}} ms and the Node bundle in {{cs("intake: Node, esbuild bundle").p50_ms|.1f}} ms, a factor of {{cs("intake: Node, esbuild bundle").p50_ms / cs("intake: Rust binary, static musl (the Lambda artefact)").p50_ms|.0f}}. Four details in the table explain where that factor comes from and what does not change it.
+
+The Node figure is mostly Node. An empty program, <code>node -e ''</code>, takes {{cs("floor: node -e '' (runtime only)").p50_ms|.1f}} ms: {{100 * cs("floor: node -e '' (runtime only)").p50_ms / cs("intake: Node, esbuild bundle").p50_ms|.0f}} % of the bundle's time is spent before the first line of the handler is read. No change to the TypeScript code can recover that share. It is the price of the runtime, paid on every cold start.
+
+Bundling and the compile cache do not matter at this size. The bundle, the unbundled compiler output and the bundle with Node's [[compile-cache|compile cache]] are within noise of each other, because a two-kilobyte script has almost nothing to resolve or compile. Both techniques help large programs, as the next section shows; applying them to a small one is ritual.
+
+Static linking is worth more than expected. The same Rust code linked dynamically takes {{cs("intake: Rust binary").p50_ms|.2f}} ms, {{cs("intake: Rust binary").p50_ms / cs("intake: Rust binary, static musl (the Lambda artefact)").p50_ms|.1f}} times the static build. The difference is the dynamic loader finding and mapping the C library before <code>main</code> runs.
+
+@if cs("intake: Rust binary, static musl (the Lambda artefact)").p50_ms < cs("floor: /bin/true (process only)").p50_ms
+The static binary doing real work is even faster than <code>/bin/true</code> doing none ({{cs("floor: /bin/true (process only)").p50_ms|.2f}} ms), because <code>/bin/true</code> is dynamically linked and pays the loader too.
+@endif
+
+Memory follows the same pattern: {{cs("intake: Rust binary, static musl (the Lambda artefact)").peak_rss_mb|.2f}} MB against {{cs("intake: Node, esbuild bundle").peak_rss_mb|.0f}} MB. On a platform that bills by memory size and duration, both factors of the bill move.
+
+Whether {{cs("intake: Node, esbuild bundle").p50_ms|.0f}} ms matters depends entirely on how often it is paid. A service that starts once a week should not care. A function that a platform starts a hundred times in the first second of an alert storm pays it a hundred times, on the path where a human is waiting. That is the first of the three places where Rust is in this package.
+
+### s-throughput | Once warm: throughput
+
+Cold start is one axis. The other is how fast each implementation works once running, measured by distilling the same log repeatedly inside one process.
+
+@py
+rows, bars = [], []
+for size in (4176, 262220, 4194383):
+    r, t = thr("rust", size), thr("typescript", size)
+    label = f"{r.bytes / 1024:,.0f} KB log"
+    rows.append((label, f"{r.mb_per_s:.0f}", f"{t.mb_per_s:.0f}", f"{r.mb_per_s / t.mb_per_s:.1f}x",
+                 f"{r.p50_ns / 1000:,.0f}", f"{t.p50_ns / 1000:,.0f}", f"{r.p99_ns / 1000:,.0f}", f"{t.p99_ns / 1000:,.0f}"))
+    bars += [(f"Rust, {label}", r.mb_per_s, 0), (f"TypeScript, {label}", t.mb_per_s, 1)]
+emit(table(["Input", "Rust MB/s", "TS MB/s", "Ratio", "Rust p50 µs", "TS p50 µs", "Rust p99 µs", "TS p99 µs"], rows, num=(1, 2, 3, 4, 5, 6, 7),
+           caption="In-process, after warm-up. Throughput is input bytes divided by mean time."))
+emit(hbar(bars, "MB/s", "{:.0f}", legend=[(0, "Rust"), (1, "TypeScript on Node")],
+          claim="Distillation throughput at three input sizes. Rust holds its rate as the log grows; so does TypeScript, at a lower level."))
+@end
+
+Rust processes about {{thr("rust", 262220).mb_per_s|.0f}} MB of log per second and TypeScript about {{thr("typescript", 262220).mb_per_s|.0f}}. The reasons are in the code shown in ((s-sift)): the Rust version masks into one reused buffer and keeps samples as borrowed slices, so a repeated line allocates nothing, and it scans bytes. The TypeScript twin builds a new string for every masked line and leaves the garbage to the collector.
+
+The tail tells a second story. At the smallest size the TypeScript median is {{thr("typescript", 4176).p50_ns / 1000|.0f}} µs and its 99th percentile is {{thr("typescript", 4176).p99_ns / 1000|.0f}} µs, {{thr("typescript", 4176).p99_ns / thr("typescript", 4176).p50_ns|.0f}} times the median, where the same ratio for Rust is {{thr("rust", 4176).p99_ns / thr("rust", 4176).p50_ns|.1f}}. A runtime with a just-in-time compiler and a garbage collector has occasional slow calls that a compiled program without either does not.
+
+And yet the agent uses the TypeScript version. Inside an agent the log is a few hundred lines, distillation takes well under a millisecond in either language (the <code>distill</code> entry in every measured record is at most {{max(x.ms.distill for r in R.scen.results for x in r.records)}} ms), and the next step is a model call of over a second. Speeding up a step that takes a thousandth of the total is not engineering. The Rust version earns its place only at the front door, where the input can be megabytes and the process is new.
+
+### s-services | Long-running services: time to ready
+
+The services are started once and kept, so their start-up time matters less, but it still decides how fast a crashed pod returns and what a readiness probe should allow. Each was timed from process start until every module was loaded and the program was ready to listen.
+
+@py
+svc = [
+ ("service: vllm-gate (Rust), bind and exit", "vllm-gate (Rust)", 0),
+ ("service: swarm dispatcher, load only", "swarm dispatcher", 1),
+ ("service: swarm dispatcher, load only + compile cache", "swarm dispatcher, compile cache", 2),
+ ("service: MCP server, load only", "MCP server", 1),
+ ("service: MCP server, load only + compile cache", "MCP server, compile cache", 2),
+ ("service: retrieval agent (LangGraph + A2A), load only", "retrieval agent", 1),
+ ("service: retrieval agent (LangGraph + A2A), load only + compile cache", "retrieval agent, compile cache", 2),
+ ("service: reason agent (ADK + MCP + A2A), load only", "reason agent", 1),
+ ("service: reason agent (ADK + MCP + A2A), load only + compile cache", "reason agent, compile cache", 2),
+]
+rows = []
+for name, label, _ in svc:
+    r = cs(name)
+    rows.append((label, f"{r.p50_ms:.1f}", f"{r.p90_ms:.1f}", f"{r.peak_rss_mb:.1f}", f"{r.artifact_bytes / 1e6:.2f}"))
+emit(table(["Service", "Median ms", "p90 ms", "Peak RSS MB", "File MB"], rows, num=(1, 2, 3, 4)))
+emit(hbar([(label, cs(name).p50_ms, series) for name, label, series in svc], "ms", "{:.0f}",
+          legend=[(0, "Rust"), (1, "TypeScript on Node"), (2, "the same, with Node's compile cache")],
+          claim="Median time from process start until every module is loaded. Start-up grows with the frameworks a service imports."))
+@end
+
+The TypeScript services take between {{cs("service: swarm dispatcher, load only").p50_ms|.0f}} and {{cs("service: reason agent (ADK + MCP + A2A), load only").p50_ms|.0f}} ms, and the order is the order of what they import: the dispatcher needs two protocol clients, the reason agent needs an agent framework. Here the compile cache does help. It stores V8's compiled bytecode on disk after the first start, and it takes the reason agent from {{cs("service: reason agent (ADK + MCP + A2A), load only").p50_ms|.0f}} to {{cs("service: reason agent (ADK + MCP + A2A), load only + compile cache").p50_ms|.0f}} ms, {{100 * (1 - cs("service: reason agent (ADK + MCP + A2A), load only + compile cache").p50_ms / cs("service: reason agent (ADK + MCP + A2A), load only").p50_ms)|.0f}} % less. It costs one environment variable, <code>NODE_COMPILE_CACHE</code>, pointing at a writable directory.
+
+None of this argues for rewriting the agents in Rust. {{cs("service: reason agent (ADK + MCP + A2A), load only").p50_ms|.0f}} ms, paid when a pod starts, is invisible next to the model calls an agent then waits for, and the SDKs for ADK, MCP, A2A and LangGraph that make the agents short to write exist for TypeScript and Python, not for Rust.
+
+### s-imports | What each SDK costs to load
+
+The service numbers are sums. The parts were measured too, by importing each package alone, unbundled, from <code>node_modules</code>.
+
+@py
+pk = [("import: @google/adk", "@google/adk"), ("import: @langchain/langgraph", "@langchain/langgraph"),
+      ("import: @modelcontextprotocol/sdk/client/index.js", "MCP SDK client"),
+      ("import: @huggingface/transformers", "@huggingface/transformers"),
+      ("import: express", "express"), ("import: zod", "zod"), ("import: @a2a-js/sdk/client", "A2A SDK client")]
+floor = cs("floor: node -e '' (runtime only)").p50_ms
+rows = [(label, f"{cs(n).p50_ms:.0f}", f"{cs(n).p50_ms - floor:.0f}", f"{cs(n).peak_rss_mb:.0f}") for n, label in pk]
+emit(table(["Package", "Median ms", "Above an empty Node", "Peak RSS MB"], rows, num=(1, 2, 3),
+           caption="One import per fresh process, from node_modules, median of " + str(cs("import: zod").runs) + " runs."))
+emit(hbar([(label, cs(n).p50_ms, 1) for n, label in pk] + [("node with no import", floor, 2)], "ms", "{:.0f}",
+          claim="Median time for a fresh Node process to import one package. One agent framework costs more than every other dependency together."))
+@end
+
+Importing ADK alone takes {{cs("import: @google/adk").p50_ms|.0f}} ms. The bundled reason agent, which contains ADK and three other SDKs, starts in {{cs("service: reason agent (ADK + MCP + A2A), load only").p50_ms|.0f}} ms, less than the unbundled import of one of its parts. That is what bundling buys at this size: one file read and parsed, where the unbundled package is hundreds of files that Node has to find, open and link one by one.
+
+These numbers are the reason the embedding library is imported lazily (((s-embed))), and the reason the reflex swarm does not use an agent framework at all. An agent that is one function needs no framework, and not importing one is the cheapest optimisation in the package.
+
+### s-rust-rule | Where Rust has to be, and where it does not
+
+@py
+v, w = R.von, R.vonw
+rows = [
+ ("intake, Rust static", f"{cs('intake: Rust binary, static musl (the Lambda artefact)').p50_ms:.2f} ms", "per event, on a function platform"),
+ ("intake, TypeScript bundle", f"{cs('intake: Node, esbuild bundle').p50_ms:.1f} ms", "the same work"),
+ ("vllm-gate, Rust", f"{cs('service: vllm-gate (Rust), bind and exit').p50_ms:.1f} ms", "sidecar, once per pod start"),
+ ("swarm dispatcher", f"{cs('service: swarm dispatcher, load only').p50_ms:.0f} ms", "once per pod start"),
+ ("MCP server", f"{cs('service: MCP server, load only').p50_ms:.0f} ms", "once per pod start"),
+ ("retrieval agent", f"{cs('service: retrieval agent (LangGraph + A2A), load only').p50_ms:.0f} ms", "plus the first embedding"),
+ ("reason agent", f"{cs('service: reason agent (ADK + MCP + A2A), load only').p50_ms:.0f} ms", "once per pod start"),
+ ("decision model, weights cached", f"{w.process_to_first_answer_s:.1f} s", "process start to first answer"),
+ ("decision model, cold disk", f"{v.process_to_first_answer_s:.0f} s", "process start to first answer"),
+ ("vLLM on a GPU", "not measured", "no GPU on the test machine"),
+]
+emit(table(["Component", "Cold start", "Paid"], rows, num=(1,),
+           caption="Every start-up time in the system, in one column."))
+@end
+
+The table spans five orders of magnitude, and the language choice only moves the top of it. The rule that produced the package follows from that.
+
+Rust is required where a process is started per event and someone waits for it: intake on a function platform. It is required where a component sits on the path of every request with a budget of well under a millisecond and has to stay small as a sidecar: the gateway. And it was required once more for an unglamorous reason: a measuring tool has to be much smaller than what it measures.
+
+Everywhere else TypeScript is the right tool, and the reason is the same each time: the component waits on a network or on a model for a hundred to a thousand times longer than it computes. The slowest starts in the system are the models, and no choice of implementation language for the agents changes those by a millisecond. They are handled by architecture: long-running pods, start-up probes that ask real questions, and a fast path that never waits for the slowest component.
+
+### s-quiz-rust | Check
+
+@quiz
+? An empty Node program takes about {{cs("floor: node -e '' (runtime only)").p50_ms|.0f}} ms to start and the bundled intake about {{cs("intake: Node, esbuild bundle").p50_ms|.0f}} ms. What follows?
+- The handler should be optimised until it reaches the floor :: The handler's own share is the small difference between the two numbers. Removing all of it would not reach the Rust figure.
++ Most of the TypeScript cold start is the runtime, which no change to the handler can remove :: The runtime's start is a fixed cost per process. Where that cost is paid often, the remedy is a program without a runtime, not a better handler.
+- Bundling was done incorrectly :: The unbundled output measured the same; at two kilobytes there is nothing for bundling to save.
+? The first harness reported the Rust binary's peak memory at {{cs0("intake: Rust binary").peak_rss_mb}} MB. What was actually being reported?
+- The size of the binary on disk :: The file is about one megabyte, and disk size is not resident memory.
+- Memory used by the page cache :: Page cache is not charged to a process's resident set.
++ The footprint of the Python interpreter that forked the child, which Linux carries across exec as the child's high-water mark :: The clue was the control: a program that does nothing reported the same figure.
+? Why do the agents stay in TypeScript although the Rust intake starts {{cs("intake: Node, esbuild bundle").p50_ms / cs("intake: Rust binary, static musl (the Lambda artefact)").p50_ms|.0f}} times faster than its TypeScript twin?
+- Rust cannot make HTTP requests :: The gateway in this package is a Rust HTTP client and server.
++ An agent's start-up is paid once per pod and its running time is dominated by waiting for models, so the language changes nothing a user would notice, while the SDKs exist for TypeScript :: Optimising a part that is a thousandth of the total buys nothing and costs the ecosystem.
+- TypeScript uses less memory :: It uses more, as every table in this chapter shows.
+? The compile cache cut the reason agent's start by {{100 * (1 - cs("service: reason agent (ADK + MCP + A2A), load only + compile cache").p50_ms / cs("service: reason agent (ADK + MCP + A2A), load only").p50_ms)|.0f}} % and did nothing for the intake script. Why the difference?
++ The cache saves compilation, and a four-megabyte bundle has a great deal to compile where a two-kilobyte script has almost none :: A technique's benefit is proportional to the cost it removes. Measure before adopting it everywhere.
+- The cache only works for files larger than one megabyte :: There is no such threshold.
+- The intake script is not JavaScript :: It is; the bundle is a JavaScript module.
+@end

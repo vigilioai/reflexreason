@@ -1,0 +1,156 @@
+## ch-door | The door: MCP, RBAC and a server that says no
+
+### s-why-door | Where the limits have to live
+
+An agent that can run <code>kubectl</code> can do whatever its credential allows, and what it decides to do depends on text it has read. The usual response is to write careful instructions. Instructions are advice. The design here follows a rule that is stricter: an action that must never happen is an action that does not exist anywhere the agent can reach.
+
+The [[mcp|Model Context Protocol]] is a good place to apply that rule. It standardises one thing: a server publishes tools, each with a name, a description and a JSON Schema for its arguments, and a client calls them over JSON-RPC. The protocol says nothing about what a tool may do, and that is the opening. In this system the MCP server named kube-ops is the only process that holds a Kubernetes credential, it offers ten tools, none of them deletes anything, and each write passes a stack of checks that are code, not prompt. The failure this prevents has a name, the [[confused-deputy|confused deputy]]: a program with authority that is tricked into using it on behalf of someone without any.
+
+The checks are stacked so that each one still holds if the one above it is bypassed.
+
+@py
+emit(pipeline([
+ ("Policy", ["known runbook,", "p above", "threshold"]),
+ ("Write token", ["are write tools", "even visible?"]),
+ ("Allowlist", ["only the trading", "namespace"]),
+ ("Budget", ["3 writes per", "workload", "in 10 minutes"]),
+ ("Ceiling", ["memory limit", "at most 256 Mi"]),
+ ("RBAC", ["patch on", "deployments,", "nothing else"]),
+], "A write passes six gates from left to right. The first is the agent's own policy; the next four are in the MCP server; the last is in Kubernetes and holds even if the server itself is compromised.",
+ below=[["reflex agent"], ["kube-ops"], ["kube-ops"], ["kube-ops"], ["kube-ops"], ["API server"]]))
+@end
+
+### s-rbac | The identity, and what it can do
+
+The outermost wall is Kubernetes [[rbac|RBAC]]. The agents' identity is one ServiceAccount, and one Role in the trading namespace lists everything it may do.
+
+@code deploy/k8s/00-oncall-rbac.yaml :: kind: Role :: verbs: \[patch\]
+
+<dl class="walk">
+<dt><code>resources: [pods, pods/log, events]</code> with <code>verbs: [get, list, watch]</code></dt>
+<dd>Read access to the three things evidence is made of. <code>pods/log</code> is a separate resource in Kubernetes: permission to read pods does not include their logs.</dd>
+<dt><code>resources: [deployments, replicasets]</code>, read</dt>
+<dd>ReplicaSets are needed because that is where Kubernetes keeps the previous versions of a Deployment. Rolling back means reading one of them (((s-undo))).</dd>
+<dt><code>resources: [deployments]</code> with <code>verbs: [patch]</code></dt>
+<dd>The only write. Rollback, restart and a new memory limit are all patches to a Deployment. There is no <code>delete</code>, no <code>create</code>, no access to Secrets and no <code>pods/exec</code>. A Role is an allowlist: what is not written here is denied.</dd>
+</dl>
+
+What a Role says and what the API server enforces should be checked, not assumed. <code>scripts/45-door-check.sh</code> asks the cluster directly, impersonating the ServiceAccount with <code>kubectl auth can-i ... --as</code>, and the table is its output.
+
+@py
+rows = [(r.verb, r.resource, r.namespace, "<b>yes</b>" if r.allowed == "yes" else "no")
+        for r in R.door.rbac]
+emit(table(["Verb", "Resource", "Namespace", "Allowed"], rows,
+           caption="Answers from the API server for " + R.door.identity + "."))
+@end
+
+The same identity is used during local development. <code>scripts/40-dev-up.sh</code> starts <code>kubectl proxy --as=system:serviceaccount:oncall:kube-ops</code>, so the agents on a laptop reach the cluster with exactly the permissions their pods will have. Developing with an administrator's kubeconfig and discovering the missing permission in production is a common and avoidable way to lose an afternoon.
+
+### s-guards | The checks inside the server
+
+RBAC cannot express "at most three times in ten minutes" or "not above 256 Mi". Those limits live in the server, in one function that every write tool calls first.
+
+@code ts/src/mcp/server.ts :: function guard(namespace: string :: ^}
+
+<dl class="walk">
+<dt><code>if (!config.allowedNamespaces.includes(namespace)) throw ...</code></dt>
+<dd>The namespace allowlist. RBAC already limits the identity to one namespace, so this check looks redundant, and that is the intent. It fails earlier, with a message a person can read, and it still holds if someone later binds the ServiceAccount to a wider Role.</dd>
+<dt><code>const recent = (spent.get(...) ?? []).filter((t) =&gt; t &gt; cutoff);</code></dt>
+<dd>The timestamps of earlier writes to this workload that are still inside the window. <code>spent</code> is a map in memory from workload to timestamps.</dd>
+<dt><code>if (recent.length &gt;= config.actionBudget) throw ...</code></dt>
+<dd>The action budget: three writes per workload per ten minutes by default. An agent that is wrong can be wrong three times and then has to stop. Without this, a rollback that does not help, followed by a detection that fires again, is a loop that rolls a deployment back and forth for as long as nobody is looking.</dd>
+<dt><code>spent.set(..., [...recent, Date.now()]);</code></dt>
+<dd>The attempt is charged before the action runs. An action that fails halfway still counts, which is the conservative choice.</dd>
+</dl>
+
+@code ts/src/mcp/server.ts :: const write = ( :: ^  return server;
+
+<dl class="walk">
+<dt><code>const write = (name, description, extra, run) =&gt; { ... }</code></dt>
+<dd>A small factory. Every write tool is registered through it, so no write tool can exist that skips the guard, the dry-run switch or the audit record.</dd>
+<dt><code>guard(a.namespace, a.deployment);</code></dt>
+<dd>First statement of every write. It throws on a violation, and the MCP SDK turns a thrown error into a tool result marked as an error, which the caller sees as a refusal with the reason.</dd>
+<dt><code>const dryRun = a.dry_run || config.shadow;</code></dt>
+<dd>Two ways to ask for a rehearsal. A caller can set <code>dry_run</code> for one call, or the operator can start the server with <code>SHADOW=1</code>, which forces it for every call. In both cases the request goes to the API server with <code>?dryRun=All</code>: a [[dry-run|server-side dry run]] is validated, admitted and authorised like a real request and then not stored. Shadow mode is how this system should spend its first weeks on a real cluster: it decides everything, records everything and changes nothing.</dd>
+<dt><code>await ops.annotate(a.namespace, a.deployment, { action, fingerprint, at })</code></dt>
+<dd>After a real write, the Deployment gets an annotation <code>oncall.rr/last-action</code> with the action, the incident fingerprint and the time. The audit trail lives on the object that was changed, where <code>kubectl describe</code> shows it to whoever wonders why the revision moved.</dd>
+<dt><code>if (a.memory_mi &gt; config.maxMemoryMi) throw ...</code></dt>
+<dd>The memory ceiling, inside the one tool it applies to. The tool's description, which a language model reads, states the same number, but the description is a courtesy and this line is the limit.</dd>
+</dl>
+
+Each refusal was provoked on purpose by the door check, with a valid operator token, and these are the server's own replies.
+
+@py
+m = R.door.mcp
+emit(table(["Attempt", "Reply"], [
+ ("rollout_undo in namespace kube-system", esc(m.rollout_undo_wrong_namespace)),
+ ("set_memory_limit to 4096 Mi", esc(m.memory_above_ceiling)),
+ ("rollout_undo without the operator token", esc(m.rollout_undo_without_token)),
+ ("rollout_restart with dry_run", esc(m.rollout_restart_dry_run_with_token)),
+]))
+@end
+
+One limitation is deliberate and should be known. The budget is kept in the server's memory. A restart clears it, and two replicas of the server would each keep their own count. The manifest runs one replica for that reason. Moving the count into an annotation on the Deployment would remove the limit and is the first change to make before running more than one.
+
+### s-undo | Rolling back without kubectl
+
+There is no "undo" verb in the Kubernetes API. <code>kubectl rollout undo</code> is client-side logic, and an agent that may not shell out has to do the same thing itself. A Deployment keeps its history as [[replicaset|ReplicaSets]]: every change to the pod template creates a new one, and the old ones stay, scaled to zero, each carrying a revision number.
+
+@code ts/src/kube/ops.ts :: export async function rolloutUndo :: ^}
+
+<dl class="walk">
+<dt><code>const previous = sets.at(-2);</code></dt>
+<dd><code>rolloutHistory</code> returns the Deployment's ReplicaSets sorted by revision. The last one is the current revision, the one before it is where to return to.</dd>
+<dt><code>if (!previous) throw new Error(...)</code></dt>
+<dd>A Deployment that has never been changed has nothing to roll back to. The policy checks this before calling (((s-policy))), and the tool checks again, because a tool must be safe for any caller.</dd>
+<dt><code>const template = structuredClone(previous.spec.template);</code></dt>
+<dd>The whole pod template of the earlier revision: image, environment, probes, limits. A copy, because the next line edits it.</dd>
+<dt><code>delete template.metadata?.labels?.["pod-template-hash"];</code></dt>
+<dd>Kubernetes adds this label to a ReplicaSet's template to tell revisions apart. It is derived, not authored, and it must not be written back into the Deployment. <code>kubectl</code> removes it too.</dd>
+<dt><code>[{ op: "replace", path: "/spec/template", value: template }]</code></dt>
+<dd>A JSON Patch that replaces the template in one operation. Kubernetes notices that the new template equals an existing ReplicaSet's, scales that one up and the broken one down, and gives it the next revision number. With <code>dry(dryRun)</code> appended to the URL the same request is validated and discarded.</dd>
+</dl>
+
+### s-mcp-http | One request, one server
+
+@code ts/src/mcp/server.ts :: export function serve(port :: ^}
+
+<dl class="walk">
+<dt><code>if (req.url !== "/mcp" || req.method !== "POST")</code></dt>
+<dd>The server speaks MCP's Streamable HTTP transport in its simplest form: one POST per call, one reply. It keeps no server-to-client stream open, so GET is refused.</dd>
+<dt><code>const mayWrite = !config.mcpWriteToken || sameSecret(given, ...)</code></dt>
+<dd>If an operator token is configured, the caller must present it to see the write tools. The comparison is constant-time (((s-tokens))). Without a configured token everything is offered, which is the default on a developer's own machine.</dd>
+<dt><code>const server = buildServer(mayWrite);</code></dt>
+<dd>A new MCP server object for this one request. For a caller without the token, <code>buildServer</code> returns before the write tools are registered, so they are not hidden or forbidden: they are absent. The reason agent, which reads untrusted text all day, connects without the token and cannot even list them.</dd>
+<dt><code>sessionIdGenerator: undefined</code></dt>
+<dd>Stateless mode. No session survives the request, so there is nothing to leak between callers, nothing to lose when the pod restarts and no sticky routing to configure.</dd>
+<dt><code>res.on("close", ...)</code></dt>
+<dd>When the HTTP response ends, the transport and the server are closed and collected. A fresh object per request sounds expensive and is not: the swarm benchmark in ((s-swarm-memory)) pushes a thousand concurrent agents through this pattern.</dd>
+</dl>
+
+The token changes what each caller sees. The two lists below were fetched from the running server by the door check.
+
+@py
+m = R.door.mcp
+emit(table(["Caller", "Tools listed"], [
+ ("without the operator token", ", ".join(m.tools_without_token)),
+ ("with the operator token", ", ".join(m.tools_with_token)),
+]))
+@end
+
+### s-quiz-door | Check
+
+@quiz
+? The Role already confines the ServiceAccount to the trading namespace. Why does the MCP server check the namespace again?
+- RBAC rules are only evaluated once per hour :: They are evaluated on every request.
++ So that the limit survives a later mistake in RBAC, and fails early with a readable reason :: Independent layers are the point. If someone binds the account to a wider Role next year, the server still refuses, and the refusal names the allowlist.
+- Because MCP requires every tool to validate its namespace :: MCP says nothing about what tools do or check.
+? What does starting the server with <code>SHADOW=1</code> do to a rollback request?
+- It is rejected before reaching Kubernetes :: It is sent. The value of shadow mode is that the real API server evaluates the real request.
+- It is queued until a person approves it :: There is no approval queue in this design.
++ It is sent to the API server as a dry run: validated and authorised, then not stored :: The decision, the patch and the permission check are all exercised; only persistence is skipped, and no audit annotation is written.
+? The reason agent connects to the same MCP server as the swarm. What stops it from calling <code>rollout_undo</code>?
+- Its instructions tell it not to :: They do, and that is the weakest of the protections, not the one that holds.
++ It does not hold the operator token, so the server builds it a tool list without any write tool :: The tool is not refused, it is absent. A call to it gets "tool not found" from the SDK.
+- NetworkPolicy blocks its packets to the server :: The policy allows the reason agent to reach the server, because it needs the read tools.
+@end

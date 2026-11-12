@@ -1,0 +1,71 @@
+{
+ "overhead": [
+  {
+   "case": "small prompt, no tools",
+   "request_bytes": 106,
+   "requests": 400,
+   "gate_internal_us": 18.5,
+   "direct": {
+    "p50_ms": 2.146,
+    "p99_ms": 6.262
+   },
+   "via_gate": {
+    "p50_ms": 2.689,
+    "p99_ms": 7.386
+   },
+   "added_p50_ms": 0.543
+  },
+  {
+   "case": "agent prompt, 8 tools",
+   "request_bytes": 5072,
+   "requests": 400,
+   "gate_internal_us": 112.2,
+   "direct": {
+    "p50_ms": 2.095,
+    "p99_ms": 5.84
+   },
+   "via_gate": {
+    "p50_ms": 2.512,
+    "p99_ms": 5.79
+   },
+   "added_p50_ms": 0.417
+  }
+ ],
+ "coalesce": {
+  "identical_requests": 200,
+  "upstream_calls": 1,
+  "miss": 1,
+  "coalesced": 199,
+  "hit": 0,
+  "wall_ms": 355
+ },
+ "cache": {
+  "requests": 100,
+  "distinct_prompts": 10,
+  "hits": 90,
+  "upstream_calls": 10
+ },
+ "prefix": [
+  {
+   "session": "stable client",
+   "turns": 12,
+   "prompt_bytes": 80436,
+   "shared_as_sent_pct": 94.6,
+   "shared_canonical_pct": 94.6
+  },
+  {
+   "session": "client shuffles tools and keys",
+   "turns": 12,
+   "prompt_bytes": 80436,
+   "shared_as_sent_pct": 0.2,
+   "shared_canonical_pct": 94.6
+  },
+  {
+   "session": "clock in the system prompt",
+   "turns": 12,
+   "prompt_bytes": 80832,
+   "shared_as_sent_pct": 52.3,
+   "shared_canonical_pct": 52.1
+  }
+ ]
+}

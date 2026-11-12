@@ -1,0 +1,89 @@
+# Nothing in the oncall namespace talks to anything it was not built to talk
+# to. A hijacked agent cannot reach the internet, and only one pod can reach
+# the Kubernetes API.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny, namespace: oncall}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# Every pod may resolve names.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: allow-dns, namespace: oncall}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: kube-system}
+    ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+---
+# Traffic between the project's own pods, in the directions the design uses.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: swarm-egress, namespace: oncall}
+spec:
+  podSelector: {matchLabels: {app: swarm}}
+  policyTypes: [Egress]
+  egress:
+  - to:
+    - podSelector:
+        matchExpressions:
+        - key: app
+          operator: In
+          values: [kube-ops-mcp, rag, reason, decision]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: reason-egress, namespace: oncall}
+spec:
+  podSelector: {matchLabels: {app: reason}}
+  policyTypes: [Egress]
+  egress:
+  - to:
+    - podSelector:
+        matchExpressions:
+        - key: app
+          operator: In
+          values: [kube-ops-mcp, rag, decision, llm]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: rag-egress, namespace: oncall}
+spec:
+  podSelector: {matchLabels: {app: rag}}
+  policyTypes: [Egress]
+  egress:
+  - to: [{podSelector: {matchLabels: {app: decision}}}]
+---
+# The MCP server is the only pod that may reach the Kubernetes API. The
+# API's address differs per distribution, so the rule is by port; tighten it
+# to your API server's IP with an ipBlock.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: mcp-egress, namespace: oncall}
+spec:
+  podSelector: {matchLabels: {app: kube-ops-mcp}}
+  policyTypes: [Egress]
+  egress:
+  - ports: [{protocol: TCP, port: 443}, {protocol: TCP, port: 6443}]
+---
+# Who may call whom.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: ingress-from-agents, namespace: oncall}
+spec:
+  podSelector:
+    matchExpressions:
+    - key: app
+      operator: In
+      values: [kube-ops-mcp, rag, reason, decision, llm]
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector:
+        matchExpressions:
+        - {key: app, operator: In, values: [swarm, reason, rag]}

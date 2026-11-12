@@ -1,0 +1,148 @@
+## ch-build | Build it
+
+### s-layout | What is in the package
+
+One shell script builds everything, and the directory names say which language owns which job. TypeScript holds every agent and every protocol. Rust holds three programs and one library, each of which exists because of a measurement in ((ch-rust)).
+
+@py
+tree = """reflex-reason/
+  build.sh                 the whole build: test, compile, bundle, package
+  rust/crates/
+    sift/                  log distiller (library, no dependencies)
+    intake/                front door: CLI and AWS Lambda bootstrap
+    vllm-gate/             proxy in front of vLLM
+    rusage/                measures a child process for the benchmarks
+  ts/src/
+    intake/                TypeScript twin of sift, CLI and Lambda handler
+    kube/                  Kubernetes REST calls, no client library
+    mcp/                   kube-ops MCP server and its client
+    reflex/                state, policy and the reflex agent
+    rag/                   ingest, embed, store, LangGraph graph, A2A server
+    swarm/                 dispatcher: detect, lease, fan out
+    reason/                ADK agent and the OpenAI-compatible model adapter
+    a2a/                   bearer-token middleware and A2A client
+    mock/                  stand-ins: language model, decision model, MCP
+    eval/  bench/          scenario runner and benchmarks
+  ts/skills/               the skill the reason agent loads
+  runbooks/                eight procedures in Markdown
+  deploy/scenarios/        the toy trading stack
+  deploy/k8s/              RBAC, decision model, vLLM, agents, network rules
+  deploy/docker/           three Dockerfiles
+  deploy/sam/              AWS SAM template for the front door
+  scripts/                 numbered: cluster, deploy, inject, run, measure
+  bench/                   benchmark harnesses and results/
+  fixtures/                labelled states for the decision benchmark
+  docs/                    this tutorial and its generator"""
+import pathlib
+root = pathlib.Path(RES).parent.parent
+for path in ["build.sh", "rust/crates/sift", "rust/crates/intake",
+             "rust/crates/vllm-gate", "rust/crates/rusage", "ts/skills",
+             "runbooks", "deploy/scenarios", "deploy/k8s", "deploy/docker",
+             "deploy/sam", "scripts", "bench/results", "fixtures", "docs"] + [
+             f"ts/src/{d}" for d in ["intake", "kube", "mcp", "reflex", "rag",
+             "swarm", "reason", "a2a", "mock", "eval", "bench"]]:
+    assert (root / path).exists(), path
+assert all(len(l) <= 76 for l in tree.split("\n"))
+emit('<pre class="code plain"><code>' + esc(tree) + "</code></pre>")
+@end
+
+### s-prereq | What the machine needs
+
+The build needs Node 22.12 or newer, Rust through rustup, Python 3 and network access to npm, crates.io and Hugging Face. Docker is needed only for container images and for the Lambda emulator. A GPU is needed only by the vLLM pod; the whole reflex path, including the decision model, runs on CPU. <code>scripts/00-prereqs.sh</code> prints what is present and what each missing piece would be used for, and changes nothing.
+
+### s-build | The build script, step by step
+
+@code build.sh :: #!/usr/bin/env bash :: ^OUT=
+
+<dl class="walk">
+<dt><code>set -euo pipefail</code></dt>
+<dd>Three switches that turn a shell script from "keeps going after an error" into "stops at the first one". <code>-e</code> exits when a command fails, <code>-u</code> treats an unset variable as an error, and <code>pipefail</code> makes a pipeline fail when any stage fails, not only the last. Without the third, <code>cargo test | grep</code> would report success whenever grep found a line, even with failing tests.</dd>
+<dt><code>ROOT="$(cd "$(dirname "$0")" &amp;&amp; pwd)"</code></dt>
+<dd>The absolute directory of the script itself. Every later path is relative to it, so the script can be started from anywhere.</dd>
+<dt><code>step() { printf '\n== %s\n' "$*"; }</code></dt>
+<dd>A banner for the log. When a build fails forty lines down, the last banner says which of the seven steps it was.</dd>
+<dt><code>index_summary() { python3 -c '...'; }</code></dt>
+<dd>The ingest step prints one long line of JSON. This function turns it into a short sentence for the log. It reads standard input, so it is used at the end of a pipe, and with <code>pipefail</code> a failure of the step before the pipe still stops the build.</dd>
+<dt><code>MUSL=x86_64-unknown-linux-musl</code></dt>
+<dd>The Rust target that links against [[musl|musl]] and produces a fully static binary. The two shipped Rust programs are built twice: once for the host, which is what the benchmarks time, and once static, which is what goes into the container image and into the Lambda package.</dd>
+</dl>
+
+@code build.sh :: step "1/7 toolchain" :: cargo build --release --quiet --target
+
+<dl class="walk">
+<dt><code>node -e '...'</code></dt>
+<dd>The version check is written in JavaScript because comparing "22.9" with "22.12" as text gives the wrong answer. The floor is conservative. Every measurement was taken on {{R.cold.machine.node}}, and 22.12 is the first release of the 22 line in which <code>require()</code> of an ES module works without a flag, so nothing older was considered.</dd>
+<dt><code>cargo test --release --quiet 2&gt;&amp;1 | grep -E ... || true</code></dt>
+<dd>Runs the Rust unit tests and keeps only the summary lines. The <code>|| true</code> is there because grep exits non-zero when it prints nothing, and the next line would catch a real failure anyway: <code>cargo build</code> on code whose tests do not compile fails. The output in ((s-build-output)) shows one such line per crate.</dd>
+<dt><code>cargo build --release --quiet</code></dt>
+<dd>The host build. The release profile in <code>rust/Cargo.toml</code> sets <code>opt-level = 3</code>, <code>lto = "fat"</code>, <code>codegen-units = 1</code>, <code>panic = "abort"</code> and <code>strip = true</code>. Whole-program optimisation and one code generation unit cost build time and buy a smaller, faster binary; aborting on panic removes the unwinding tables; stripping removes symbols. For a program whose reason to exist is start-up time and size, all four are the right trade.</dd>
+<dt><code>rustup target list --installed | grep -q "$MUSL" || rustup target add "$MUSL"</code></dt>
+<dd>Installs the static target once. A static binary has no dynamic loader step, so it starts in a <code>scratch</code> container that contains nothing else, and in a Lambda runtime whatever C library that runtime ships.</dd>
+</dl>
+
+@code build.sh :: step "3/7 typescript :: %9d
+
+<dl class="walk">
+<dt><code>npm ci --no-audit --no-fund --loglevel=error</code></dt>
+<dd><code>npm ci</code> installs exactly what <code>package-lock.json</code> records and fails if the lock file and <code>package.json</code> disagree. <code>npm install</code> would quietly update the lock. A build that has to give the same bundles on another machine uses <code>ci</code>.</dd>
+<dt><code>npx tsc &amp;&amp; node esbuild.mjs</code></dt>
+<dd>Two compilers with two jobs. <code>tsc</code> type-checks everything and writes plain JavaScript that the unit tests run. [[esbuild|esbuild]] then bundles each entry point with all of its dependencies into one minified <code>.mjs</code> file under <code>ts/dist/bundle</code>. A service that starts from one file starts faster than one that resolves hundreds of files under <code>node_modules</code>, and a bundle is one thing to copy into an image.</dd>
+<dt><code>npm test</code></dt>
+<dd>{{R.build.ts_tests}} unit tests that need no cluster, no model and no network: the distiller, the policy table, the state renderer, the runbook parser, the model adapter's message conversion, the mock decision model, and the rule that the MCP server shows write tools only to a caller that may write.</dd>
+<dt><code>scripts/check-twins.sh</code></dt>
+<dd>The intake step exists twice, in Rust and in TypeScript, so that their cold starts can be compared on identical work. The comparison is only fair if they do identical work, so this script feeds five events through both, including an empty log and one with CJK text, quotes, tabs and a carriage return, and compares SHA-1 digests of the outputs. It fails the build on any difference.</dd>
+<dt><code>node dist/bundle/ingest.mjs "$ROOT/runbooks"</code></dt>
+<dd>Builds the retrieval index: reads the eight runbooks, splits them into chunks, embeds each chunk on CPU and writes <code>ts/index.json</code>. The first run downloads the 23 MB embedding model. ((ch-rag)) explains every stage.</dd>
+<dt><code>cp "$OUT/intake" dist/lambda/intake-rust/bootstrap</code></dt>
+<dd>A Lambda function on a custom runtime is a directory containing an executable named <code>bootstrap</code>. Copying and renaming the static binary is the entire packaging step. The Node package is the bundled handler, one file.</dd>
+</dl>
+
+@code build.sh :: if [ "${IMAGES:-0}" = "1" ] :: ^echo; echo
+
+<dl class="walk">
+<dt><code>npm install ... --omit=dev @huggingface/transformers@4.3.2</code></dt>
+<dd>Everything the services need is inside the bundles except the embedding runtime, which loads a native library and cannot be bundled. So the image gets a separate <code>node_modules</code> that contains only that package and what it depends on.</dd>
+<dt><code>await t.pipeline("feature-extraction", ...)</code></dt>
+<dd>Runs the embedding pipeline once at build time. The effect that matters is the side effect: the model file lands in the package's cache directory, which is then copied into the image, so a pod never needs to reach Hugging Face.</dd>
+<dt><code>find "$ORT" -mindepth 2 -maxdepth 2 -type d ! -path "$KEEP" -exec rm -rf {} +</code></dt>
+<dd>The ONNX runtime package ships native libraries for macOS, Windows and two Linux architectures, plus CUDA and TensorRT providers and WebAssembly builds for browsers. The image runs on one architecture, on CPU. This line and the two after it delete the rest. The story of why is in ((s-build-broke)).</dd>
+<dt><code>docker run --rm --network none ... node bundle/ingest.mjs runbooks</code></dt>
+<dd>The test that the deletion did not go too far: the finished image has to embed all runbooks with networking disabled. If a needed library had been removed, or the model were not in the image, this is where the build would stop.</dd>
+</dl>
+
+### s-build-output | What a clean build prints
+
+This is the output of <code>IMAGES=1 ./build.sh</code> in a freshly extracted copy of the package, recorded by <code>scripts/65-record-build.sh</code>.
+
+@py
+lines = [l.rstrip() for l in R.build.log]
+assert all(len(l) <= 76 for l in lines), [l for l in lines if len(l) > 76]
+emit('<pre class="code plain"><code>' + esc("\n".join(lines)) + "</code></pre>")
+@end
+
+### s-build-broke | What broke, and how each break shows itself
+
+<b>The agents image was {{R.imgbefore.size_reported_by_docker}}.</b> The bundles in it total about 15 MB. The rest was the embedding runtime's <code>node_modules</code>: one layer of {{R.imgbefore.node_modules_layer}}, of which a single CUDA provider library was 260 MB, in an image that never touches a GPU. After the three deletion lines the same image is {{R.build.agents_image_mb|.0f}} MB, and it still passes the offline embedding test. How to notice next time: <code>docker history</code> shows the size of each layer, and <code>du -sh node_modules/*</code> sorted by size names the package. Any dependency with native code deserves that look before it ships.
+
+<b>Two versions of the A2A SDK.</b> The current <code>@a2a-js/sdk</code> is a 1.x release with a different API from the 0.3 line that ADK 2.4.0 depends on. Installing the newest one gives two copies in the tree and objects from one being handed to the other. The fix is the exact pin <code>"@a2a-js/sdk": "0.3.14"</code> in <code>package.json</code>. How to notice: <code>npm ls @a2a-js/sdk</code> should print one version.
+
+<b>The test runner and a directory.</b> <code>node --test dist/test/</code> fails on Node 22 when given a directory in this layout; it wants files or a glob. The test script names the file. It is a small thing that costs twenty minutes when the error message says "cannot find module" and the module is plainly there.
+
+<b>Is the build reproducible?</b> It was checked, not assumed. After deleting <code>node_modules</code> and running <code>npm ci</code> again in a separate directory, {{R.repro.identical}} of {{R.repro.bundles}} bundles were byte-for-byte identical to the ones the benchmarks had measured. That is what allows a number in this document to be attributed to a file in the package.
+
+### s-quiz-build | Check
+
+@quiz
+? Why does the build produce a static musl binary in addition to the host binary?
+- Static binaries are always faster at steady state :: Not in general. The throughput benchmark runs on the host build, and musl's allocator is often slower than glibc's. The static build is about where the file can run.
++ It runs unchanged in an empty container and as a Lambda bootstrap, with no dependency on the C library of the environment :: A static binary carries everything it needs, so "which glibc does the runtime have" stops being a question. It also skips the dynamic loader at start-up.
+- Cargo cannot run unit tests on the host target :: It can and does; the tests in step 2 run on the host target.
+? The build runs the finished image once with networking disabled. What is that test protecting?
+- The unit tests, which need a container :: The unit tests ran earlier on the host and need nothing.
+- The Kubernetes manifests :: No manifest is involved in the image build.
++ That the image can embed text on its own after the unused runtime files were deleted :: The deletion saves a gigabyte, and a deletion that large needs a test that fails when it removes one file too many or when the model is missing.
+? Why <code>npm ci</code> and not <code>npm install</code>?
++ It installs exactly the locked versions and fails on a mismatch, which is what makes the bundles reproducible :: The check in this chapter found all bundles byte-identical after a clean install, and the lock file is the reason.
+- It is the only command that installs development dependencies :: Both install them by default.
+- It skips downloading packages that are already bundled :: npm knows nothing about the bundles; esbuild produces them afterwards.
+@end

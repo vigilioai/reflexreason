@@ -1,0 +1,51 @@
+{
+ "model": "Xenova/all-MiniLM-L6-v2 (q8, CPU)",
+ "runbooks": 8,
+ "rows": [
+  {
+   "variant": "whole runbook as one chunk",
+   "chunks": 8,
+   "mean_chars": 876,
+   "hit_at_1": 21,
+   "hit_at_3": 25,
+   "of": 25,
+   "embed_ms": 407
+  },
+  {
+   "variant": "fixed 200 characters",
+   "chunks": 63,
+   "mean_chars": 113,
+   "hit_at_1": 21,
+   "hit_at_3": 25,
+   "of": 25,
+   "embed_ms": 312
+  },
+  {
+   "variant": "fixed 600 characters",
+   "chunks": 17,
+   "mean_chars": 418,
+   "hit_at_1": 23,
+   "hit_at_3": 25,
+   "of": 25,
+   "embed_ms": 314
+  },
+  {
+   "variant": "one chunk per section",
+   "chunks": 40,
+   "mean_chars": 174,
+   "hit_at_1": 24,
+   "hit_at_3": 25,
+   "of": 25,
+   "embed_ms": 347
+  },
+  {
+   "variant": "per section + title and match line",
+   "chunks": 40,
+   "mean_chars": 282,
+   "hit_at_1": 22,
+   "hit_at_3": 25,
+   "of": 25,
+   "embed_ms": 356
+  }
+ ]
+}

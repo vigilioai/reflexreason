@@ -1,0 +1,74 @@
+# The reason path: vLLM on the GPU with the Rust gateway as a sidecar. The
+# Service exposes only the gateway, so every request is canonicalised,
+# counted and admission-controlled before it reaches the model. This pod is
+# long-running by design: loading weights takes far longer than any request
+# can wait.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: llm, namespace: oncall, labels: {app: llm}}
+spec:
+  replicas: 1
+  # One GPU: the old pod has to release it before the new one can start.
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: llm}}
+  template:
+    metadata: {labels: {app: llm}}
+    spec:
+      # k3s ships this class once it finds the NVIDIA container runtime.
+      runtimeClassName: nvidia
+      containers:
+      - name: vllm
+        # Qwen3.5 needs vLLM >= 0.17.0. Pin a tag once you have tested it.
+        image: vllm/vllm-openai:latest
+        args:
+        - Qwen/Qwen3.5-4B
+        - --trust-remote-code
+        - --enable-auto-tool-choice
+        - --tool-call-parser=qwen3_coder
+        - --reasoning-parser=qwen3
+        # 12 GB card: cap the context so the KV cache fits beside the
+        # weights, and cap concurrency at the number the gateway admits.
+        - --max-model-len=16384
+        - --gpu-memory-utilization=0.92
+        - --max-num-seqs=8
+        # Triage answers do not need a thinking phase; drop it for latency.
+        - '--default-chat-template-kwargs={"enable_thinking": false}'
+        env:
+        - {name: NVIDIA_VISIBLE_DEVICES, value: all}
+        - {name: NVIDIA_DRIVER_CAPABILITIES, value: all}
+        - {name: VLLM_USE_RUST_FRONTEND, value: "1"}
+        # The weights were fetched by scripts/15-fetch-model.sh. Offline
+        # mode stops vLLM from looking for anything newer; the network
+        # policy would refuse the connection anyway.
+        - {name: HF_HUB_OFFLINE, value: "1"}
+        ports: [{containerPort: 8000}]
+        # Up to 15 minutes to read the weights and load them onto the GPU.
+        startupProbe:
+          httpGet: {path: /health, port: 8000}
+          periodSeconds: 10
+          failureThreshold: 90
+        volumeMounts:
+        - {name: hf-cache, mountPath: /root/.cache/huggingface}
+        - {name: shm, mountPath: /dev/shm}
+      - name: gate
+        image: rr-rust:1.0
+        imagePullPolicy: IfNotPresent
+        env:
+        - {name: GATE_LISTEN, value: "0.0.0.0:8080"}
+        - {name: GATE_UPSTREAM, value: "http://127.0.0.1:8000"}
+        - {name: GATE_MAX_INFLIGHT, value: "8"}
+        ports: [{containerPort: 8080}]
+        resources:
+          requests: {cpu: 50m, memory: 16Mi}
+          limits: {memory: 128Mi}
+      volumes:
+      - name: hf-cache
+        hostPath: {path: /var/lib/rr/hf-cache, type: DirectoryOrCreate}
+      - {name: shm, emptyDir: {medium: Memory, sizeLimit: 2Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: llm, namespace: oncall}
+spec:
+  selector: {app: llm}
+  ports: [{port: 8080, targetPort: 8080}]

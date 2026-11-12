@@ -1,0 +1,125 @@
+# Four TypeScript services from one image. Only kube-ops-mcp carries the
+# service account that can touch the trading namespace; the agents reach the
+# cluster through it and have no Kubernetes credentials of their own. Only the
+# swarm carries the token that makes the MCP server offer its write tools.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: kube-ops-mcp, namespace: oncall, labels: {app: kube-ops-mcp}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: kube-ops-mcp}}
+  template:
+    metadata: {labels: {app: kube-ops-mcp}}
+    spec:
+      serviceAccountName: kube-ops
+      containers:
+      - name: mcp
+        image: rr-agents:1.0
+        imagePullPolicy: IfNotPresent
+        command: ["node", "bundle/mcp-server.mjs"]
+        env:
+        - {name: PORT, value: "7001"}
+        - {name: KUBE_API, value: "https://kubernetes.default.svc"}
+        - {name: KUBE_TOKEN_FILE, value: /var/run/secrets/kubernetes.io/serviceaccount/token}
+        - {name: NODE_EXTRA_CA_CERTS, value: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt}
+        - {name: ALLOWED_NAMESPACES, value: trading}
+        - {name: MCP_WRITE_TOKEN, valueFrom: {secretKeyRef: {name: mcp-write-token, key: token}}}
+        - {name: SHADOW, value: "0"}        # "1" = every write is a server-side dry run
+        ports: [{containerPort: 7001}]
+        readinessProbe: {httpGet: {path: /healthz, port: 7001}, periodSeconds: 5}
+        resources: {requests: {cpu: 20m, memory: 64Mi}, limits: {memory: 256Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: kube-ops-mcp, namespace: oncall}
+spec: {selector: {app: kube-ops-mcp}, ports: [{port: 7001, targetPort: 7001}]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: rag, namespace: oncall, labels: {app: rag}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: rag}}
+  template:
+    metadata: {labels: {app: rag}}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - name: rag
+        image: rr-agents:1.0
+        imagePullPolicy: IfNotPresent
+        command: ["node", "bundle/rag-server.mjs"]
+        env:
+        - {name: PORT, value: "7002"}
+        - {name: PUBLIC_URL, value: "http://rag.oncall.svc:7002/"}
+        - {name: SYSTEMONE_URL, value: "http://decision.oncall.svc:8100"}
+        - {name: A2A_TOKEN, valueFrom: {secretKeyRef: {name: a2a-token, key: token}}}
+        ports: [{containerPort: 7002}]
+        readinessProbe: {httpGet: {path: /healthz, port: 7002}, periodSeconds: 5}
+        resources: {requests: {cpu: 50m, memory: 200Mi}, limits: {memory: 600Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: rag, namespace: oncall}
+spec: {selector: {app: rag}, ports: [{port: 7002, targetPort: 7002}]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: reason, namespace: oncall, labels: {app: reason}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: reason}}
+  template:
+    metadata: {labels: {app: reason}}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - name: reason
+        image: rr-agents:1.0
+        imagePullPolicy: IfNotPresent
+        command: ["node", "bundle/reason-server.mjs"]
+        env:
+        - {name: PORT, value: "7003"}
+        - {name: PUBLIC_HOST, value: reason.oncall.svc}
+        - {name: MCP_URL, value: "http://kube-ops-mcp.oncall.svc:7001/mcp"}
+        - {name: RAG_URL, value: "http://rag.oncall.svc:7002"}
+        - {name: SYSTEMONE_URL, value: "http://decision.oncall.svc:8100"}
+        - {name: LLM_BASE_URL, value: "http://llm.oncall.svc:8080/v1"}
+        - {name: LLM_MODEL, value: Qwen/Qwen3.5-4B}
+        - {name: A2A_TOKEN, valueFrom: {secretKeyRef: {name: a2a-token, key: token}}}
+        ports: [{containerPort: 7003}]
+        readinessProbe: {httpGet: {path: /healthz, port: 7003}, periodSeconds: 5}
+        resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 512Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: reason, namespace: oncall}
+spec: {selector: {app: reason}, ports: [{port: 7003, targetPort: 7003}]}
+---
+# Two dispatchers on purpose: both see every incident, the Lease decides which
+# one handles it. Kill either pod and the other carries on.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: swarm, namespace: oncall, labels: {app: swarm}}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: swarm}}
+  template:
+    metadata: {labels: {app: swarm}}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - name: swarm
+        image: rr-agents:1.0
+        imagePullPolicy: IfNotPresent
+        command: ["node", "bundle/swarm.mjs", "--watch"]
+        env:
+        - {name: WATCH_NAMESPACE, value: trading}
+        - {name: MCP_URL, value: "http://kube-ops-mcp.oncall.svc:7001/mcp"}
+        # Only the swarm holds the operator token; the reason agent does not.
+        - {name: MCP_WRITE_TOKEN, valueFrom: {secretKeyRef: {name: mcp-write-token, key: token}}}
+        - {name: RAG_URL, value: "http://rag.oncall.svc:7002"}
+        - {name: REASON_URL, value: "http://reason.oncall.svc:7003"}
+        - {name: SYSTEMONE_URL, value: "http://decision.oncall.svc:8100"}
+        - {name: A2A_TOKEN, valueFrom: {secretKeyRef: {name: a2a-token, key: token}}}
+        resources: {requests: {cpu: 20m, memory: 64Mi}, limits: {memory: 256Mi}}
