@@ -7,9 +7,10 @@ TypeScript. Three small Rust programs sit where measurements said they had
 to: a front door for alert bursts, a proxy in front of vLLM, and a helper
 that measures cold starts.
 
-
+Architecture:
 ![Architecture is available in docs/images/architecture.png](docs/images/architecture.png)
-
+Latency:
+![Latency details in docs/images/latency.png](docs/images/latency.png)
 
 The full explanation, with every listing and every number, is
 `docs/reflex-reason-tutorial.html`.
