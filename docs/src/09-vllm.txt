@@ -111,7 +111,7 @@ emit(hbar([(f"first build: {b[0].case}", b[0].added_p50_ms, 2),
            (f"with TCP_NODELAY: {a[0].case}", a[0].added_p50_ms, 0),
            (f"with TCP_NODELAY: {a[1].case}", a[1].added_p50_ms, 0)],
           "ms", "{:.2f}",
-          claim="Latency added by the gateway at the median, before and after one socket option."))
+          src="bench/results/gate.json, gate-before-nodelay.json", claim="Latency added by the gateway at the median, before and after one socket option."))
 @end
 
 The gateway's own counter said it spent {{R.gate0.overhead[0].gate_internal_us|.0f}} microseconds on a small request. The benchmark said requests through it took {{R.gate0.overhead[0].added_p50_ms|.0f}} milliseconds longer. A gap of nearly three orders of magnitude between work done and time lost means the time is being lost while nobody works: something is waiting.

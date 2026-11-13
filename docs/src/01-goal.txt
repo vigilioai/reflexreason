@@ -21,7 +21,7 @@ lines.append(' "ms": {' + row(ms[:half]) + ",")
 lines.append("        " + row(ms[half:]) + "}")
 lines.append("}")
 assert all(len(l) <= 76 for l in lines)
-emit('<pre class="code plain"><code>' + esc("\n".join(lines)) + "</code></pre>")
+emit(pre("\n".join(lines), "incident record: crash-config", "scenarios.json"))
 @end
 
 Each of the four conditions forces one part of the design. To change a cluster with nobody watching, the change has to be one of a few named actions with hard limits that no input can widen, so there is a policy table and a guarded door (((ch-door))). To choose among a few actions the system needs a class with a probability attached, not a paragraph of prose, so the fast path asks a decision model and reads numbers (((ch-reflex))). The class is only as good as the evidence, and a raw log tail is mostly repetition, so the log is distilled before anything reads it (((s-sift))). Procedures have to live where a person can edit them, so the classes are [[runbook|runbooks]] in Markdown and a retrieval pipeline finds the candidates (((ch-rag))). And because some faults match nothing, there is a slower path that can read and reason but is not allowed to act (((ch-reason))).
@@ -44,67 +44,18 @@ The price is that a decision model does not explain itself, and, as Von's own mo
 
 ### s-architecture | The architecture, derived
 
-<figure class="diagram"><svg viewBox="0 0 720 376" role="img" aria-label="Nine components in three columns: the cluster side, the agents, and the models, with the calls between them." font-family="ui-sans-serif, system-ui, Helvetica, Arial, sans-serif">
-<defs><marker id="d1arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
-<g stroke="currentColor" stroke-width="1.2">
-<rect x="20" y="22" width="190" height="62" rx="6" fill="#dfeaf6"/>
-<rect x="20" y="152" width="190" height="62" rx="6" fill="#efe9db"/>
-<rect x="20" y="282" width="190" height="62" rx="6" fill="#efe9db"/>
-<rect x="265" y="22" width="190" height="62" rx="6" fill="#dfeaf6"/>
-<rect x="265" y="152" width="190" height="62" rx="6" fill="#fbe6da"/>
-<rect x="265" y="282" width="190" height="62" rx="6" fill="#fbe6da"/>
-<rect x="510" y="22" width="190" height="62" rx="6" fill="#dfeaf6"/>
-<rect x="510" y="152" width="190" height="62" rx="6" fill="#dfeaf6"/>
-<rect x="510" y="282" width="190" height="62" rx="6" fill="#fbe6da"/>
-</g>
-<g fill="none" stroke="currentColor" stroke-width="1.4" marker-end="url(#d1arr)">
-<path d="M265 42H213"/>
-<path d="M115 84V150"/>
-<path d="M115 214V280"/>
-<path d="M455 42H507"/>
-<path d="M605 84V150"/>
-<path d="M455 68H482V170H507"/>
-<path d="M360 84V150"/>
-<path d="M265 172H238V64H213"/>
-<path d="M455 194H507"/>
-<path d="M360 214V280"/>
-<path d="M455 313H507"/>
-</g>
-<g fill="currentColor" font-size="13" font-weight="700" text-anchor="middle">
-<text x="115" y="45">kube-ops</text>
-<text x="115" y="175">Kubernetes API</text>
-<text x="115" y="305">trading namespace</text>
-<text x="360" y="45">reflex swarm</text>
-<text x="360" y="175">reason agent</text>
-<text x="360" y="305">vllm-gate</text>
-<text x="605" y="45">retrieval agent</text>
-<text x="605" y="175">decision model</text>
-<text x="605" y="305">vLLM</text>
-</g>
-<g fill="currentColor" font-size="10.5" text-anchor="middle">
-<text x="115" y="61">MCP server, holds the only</text><text x="115" y="74">cluster credential</text>
-<text x="115" y="191">RBAC: read, patch deployments,</text><text x="115" y="204">no delete</text>
-<text x="115" y="321">feed-handler, order-gateway,</text><text x="115" y="334">risk-engine</text>
-<text x="360" y="61">TypeScript, one async task</text><text x="360" y="74">per incident</text>
-<text x="360" y="191">Google ADK, a skill,</text><text x="360" y="204">read-only tools</text>
-<text x="360" y="321">Rust: canonical JSON, cache,</text><text x="360" y="334">single flight</text>
-<text x="605" y="61">LangGraph: retrieve, grade,</text><text x="605" y="74">compose</text>
-<text x="605" y="191">Von 1.3 on CPU: probabilities,</text><text x="605" y="204">never text</text>
-<text x="605" y="321">Qwen3.5-4B on the GPU,</text><text x="605" y="334">long-running</text>
-</g>
-<g fill="currentColor" font-size="10.5">
-<text x="239" y="36" text-anchor="middle">MCP</text>
-<text x="107" y="121" text-anchor="end">get, patch</text>
-<text x="107" y="251" text-anchor="end">rolling update</text>
-<text x="481" y="36" text-anchor="middle">A2A</text>
-<text x="613" y="121">which runbook?</text>
-<text x="488" y="121">guard</text>
-<text x="368" y="121">A2A, if unsure</text>
-<text x="232" y="121" text-anchor="end">read only</text>
-<text x="481" y="208" text-anchor="middle">guard</text>
-<text x="368" y="251">chat completions</text>
-</g>
-</svg><figcaption>Blue boxes are the reflex path, which every incident takes. Orange boxes are the reason path, which runs only when the reflex path declines to act. The reason agent can also ask the retrieval agent for a near match over A2A; that call is left out of the drawing. Only kube-ops holds a Kubernetes credential.</figcaption></figure>
+<figure class="diagram"><svg viewBox="0 0 720 358" role="img" aria-label="Nine components in three columns: the cluster side, the agents, and the models, with the calls between them." font-family="Geist, ui-sans-serif, system-ui, Helvetica, Arial, sans-serif">
+<defs><marker id="d1arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker><pattern id="d1stripe" width="4" height="3" patternUnits="userSpaceOnUse"><rect width="4" height="3" fill="#ffffff"/><rect width="4" height="1.5" fill="currentColor"/></pattern></defs>
+<g fill="currentColor"><rect x="23" y="25" width="190" height="62"/><rect x="23" y="155" width="190" height="62"/><rect x="23" y="285" width="190" height="62"/><rect x="268" y="25" width="190" height="62"/><rect x="268" y="155" width="190" height="62"/><rect x="268" y="285" width="190" height="62"/><rect x="513" y="25" width="190" height="62"/><rect x="513" y="155" width="190" height="62"/><rect x="513" y="285" width="190" height="62"/></g>
+<g stroke="currentColor" stroke-width="1.5"><rect x="20.75" y="22.75" width="188.5" height="60.5" fill="#ffffff"/><rect x="20.75" y="152.75" width="188.5" height="60.5" fill="#ffffff"/><rect x="20.75" y="282.75" width="188.5" height="60.5" fill="#ffffff"/><rect x="265.75" y="22.75" width="188.5" height="60.5" fill="#ffffff"/><rect x="265.75" y="152.75" width="188.5" height="60.5" fill="#ffffff"/><rect x="265.75" y="282.75" width="188.5" height="60.5" fill="#ffffff"/><rect x="510.75" y="22.75" width="188.5" height="60.5" fill="#ffffff"/><rect x="510.75" y="152.75" width="188.5" height="60.5" fill="#ffffff"/><rect x="510.75" y="282.75" width="188.5" height="60.5" fill="#ffffff"/></g>
+<g stroke="currentColor" stroke-width="1.5"><rect x="20.75" y="22.75" width="188.5" height="20" fill="#f6d23c"/><rect x="20.75" y="152.75" width="188.5" height="20" fill="url(#d1stripe)"/><rect x="59.4" y="155.5" width="111.2" height="14.5" fill="#ffffff"/><rect x="20.75" y="282.75" width="188.5" height="20" fill="url(#d1stripe)"/><rect x="47.8" y="285.5" width="134.4" height="14.5" fill="#ffffff"/><rect x="265.75" y="22.75" width="188.5" height="20" fill="#f6d23c"/><rect x="265.75" y="152.75" width="188.5" height="20" fill="#22305e"/><rect x="265.75" y="282.75" width="188.5" height="20" fill="#22305e"/><rect x="510.75" y="22.75" width="188.5" height="20" fill="#f6d23c"/><rect x="510.75" y="152.75" width="188.5" height="20" fill="#f6d23c"/><rect x="510.75" y="282.75" width="188.5" height="20" fill="#22305e"/></g>
+<g font-size="12.5" font-weight="600" text-anchor="middle"><text x="115.0" y="37" fill="currentColor">kube-ops</text><text x="115.0" y="167" fill="currentColor">Kubernetes API</text><text x="115.0" y="297" fill="currentColor">trading namespace</text><text x="360.0" y="37" fill="currentColor">reflex swarm</text><text x="360.0" y="167" fill="#ffffff">reason agent</text><text x="360.0" y="297" fill="#ffffff">vllm-gate</text><text x="605.0" y="37" fill="currentColor">retrieval agent</text><text x="605.0" y="167" fill="currentColor">decision model</text><text x="605.0" y="297" fill="#ffffff">vLLM</text></g>
+<g fill="currentColor" font-size="10.5" text-anchor="middle"><text x="115.0" y="59">MCP server, holds the only</text><text x="115.0" y="73">cluster credential</text><text x="115.0" y="189">RBAC: read, patch deployments,</text><text x="115.0" y="203">no delete</text><text x="115.0" y="319">feed-handler, order-gateway,</text><text x="115.0" y="333">risk-engine</text><text x="360.0" y="59">TypeScript, one async task</text><text x="360.0" y="73">per incident</text><text x="360.0" y="189">Google ADK, a skill,</text><text x="360.0" y="203">read-only tools</text><text x="360.0" y="319">Rust: canonical JSON, cache,</text><text x="360.0" y="333">single flight</text><text x="605.0" y="59">LangGraph: retrieve, grade,</text><text x="605.0" y="73">compose</text><text x="605.0" y="189">Von 1.3 on CPU: probabilities,</text><text x="605.0" y="203">never text</text><text x="605.0" y="319">Qwen3.5-4B on the GPU,</text><text x="605.0" y="333">long-running</text></g>
+<g fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#d1arr)"><path d="M265 58H214"/><path d="M115 85V149"/><path d="M115 215V279"/><path d="M455 58H506"/><path d="M605 85V149"/><path d="M455 72H482V180H506"/><path d="M360 85V149"/><path d="M265 192H238V74H214"/><path d="M455 200H506"/><path d="M360 215V279"/><path d="M455 326H506"/></g>
+<rect x="224.5" y="39" width="30" height="13" fill="currentColor"/><text x="239.5" y="49" text-anchor="middle" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="10" fill="#ffffff">MCP</text>
+<rect x="465.5" y="39" width="30" height="13" fill="currentColor"/><text x="480.5" y="49" text-anchor="middle" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="10" fill="#ffffff">A2A</text>
+<g fill="currentColor" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="10"><text x="107" y="121" text-anchor="end">get, patch</text><text x="107" y="251" text-anchor="end">rolling update</text><text x="613" y="121" text-anchor="start">which runbook?</text><text x="488" y="121" text-anchor="start">guard</text><text x="368" y="121" text-anchor="start">A2A, if unsure</text><text x="232" y="121" text-anchor="end">read only</text><text x="481" y="215" text-anchor="middle">guard</text><text x="368" y="251" text-anchor="start">chat completions</text></g>
+</svg><figcaption>Components with a yellow title bar are the reflex path, which every incident takes. Navy title bars are the reason path, which runs only when the reflex path declines to act. Striped title bars are the cluster itself. The reason agent can also ask the retrieval agent for a near match over A2A; that call is left out of the drawing. Only kube-ops holds a Kubernetes credential.</figcaption></figure>
 
 Read the drawing from the top middle. The <b>reflex swarm</b> is one TypeScript process that starts one short-lived agent per incident. An agent never talks to Kubernetes. It calls tools on <b>kube-ops</b>, an [[mcp|MCP]] server that owns the only service account and refuses anything outside a short list. To find out which procedure applies, the agent sends the distilled evidence to the <b>retrieval agent</b> over [[a2a|A2A]]; that agent is a [[langgraph|LangGraph]] graph that retrieves candidate runbooks by vector search and asks the <b>decision model</b> which one, if any, matches. In parallel the reflex agent asks the same decision model whether the log text reads like an instruction, which is the guard against injected text.
 

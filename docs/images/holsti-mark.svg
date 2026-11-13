@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Holsti: a round Taiwan yellow tit with a navy crest">
+  <title>Holsti</title>
+  <defs>
+    <clipPath id="holsti-clip">
+      <ellipse cx="256" cy="290" rx="158" ry="150"/>
+    </clipPath>
+  </defs>
+
+  <!-- Outline layer: the silhouette shapes stroked once, so the fills
+       drawn over them leave a single clean outline. -->
+  <g fill="#1b2140" stroke="#1b2140" stroke-width="14" stroke-linejoin="round">
+    <path d="M122 356 L82 404 C96 414 116 412 128 406 L150 380 Z"/>
+    <rect x="216" y="420" width="18" height="30" rx="8"/>
+    <rect x="280" y="420" width="18" height="30" rx="8"/>
+    <ellipse cx="222" cy="454" rx="26" ry="13"/>
+    <ellipse cx="294" cy="454" rx="26" ry="13"/>
+    <path d="M312 152 C272 130 230 114 198 106 Q184 103 182 116 C177 142 168 170 160 198 Z"/>
+    <ellipse cx="256" cy="290" rx="158" ry="150"/>
+  </g>
+
+  <!-- tail and feet, behind the body -->
+  <path d="M122 356 L82 404 C96 414 116 412 128 406 L150 380 Z" fill="#22305e"/>
+  <g fill="#a7afba">
+    <rect x="216" y="420" width="18" height="30" rx="8"/>
+    <rect x="280" y="420" width="18" height="30" rx="8"/>
+    <ellipse cx="222" cy="454" rx="26" ry="13"/>
+    <ellipse cx="294" cy="454" rx="26" ry="13"/>
+  </g>
+
+  <!-- crest and the white stripe at its back -->
+  <path d="M312 152 C272 130 230 114 198 106 Q184 103 182 116 C177 142 168 170 160 198 Z" fill="#22305e"/>
+  <path d="M188 118 C183 142 176 168 170 198 C176 201 183 200 188 195 C192 168 198 144 204 122 Z" fill="#ffffff"/>
+
+  <!-- body: yellow, navy hood and back, soft lights -->
+  <ellipse cx="256" cy="290" rx="158" ry="150" fill="#f6d23c"/>
+  <g clip-path="url(#holsti-clip)">
+    <ellipse cx="282" cy="368" rx="92" ry="60" fill="#fbe47e"/>
+    <path d="M40 40 H480 V250 C434 244 384 254 346 262 C286 274 206 300 124 356 L40 400 Z" fill="#22305e"/>
+    <ellipse cx="236" cy="188" rx="64" ry="24" fill="#33467f" opacity="0.8" transform="rotate(-14 236 188)"/>
+  </g>
+
+  <!-- wing, tucked against the side -->
+  <path d="M158 300 C205 290 262 314 286 350 C298 374 284 402 254 404 C210 408 168 386 152 352 C144 330 146 308 158 300 Z" fill="#3a59b0" stroke="#1b2140" stroke-width="7" stroke-linejoin="round"/>
+  <g fill="none" stroke="#7d9be3" stroke-width="7" stroke-linecap="round">
+    <path d="M182 336 C208 348 236 362 258 388"/>
+    <path d="M172 362 C196 374 220 386 238 400"/>
+  </g>
+
+  <!-- face: blush, eye, beak -->
+  <ellipse cx="362" cy="318" rx="20" ry="11" fill="#f19a76" opacity="0.6"/>
+  <circle cx="336" cy="286" r="14" fill="#14161f"/>
+  <circle cx="341" cy="281" r="4.5" fill="#ffffff"/>
+  <path d="M390 274 C420 282 434 294 430 303 C414 310 396 308 384 300 Z" fill="#15161c" stroke="#15161c" stroke-width="4" stroke-linejoin="round"/>
+</svg>

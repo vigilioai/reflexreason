@@ -127,7 +127,7 @@ lines = ["{", f' "model": "{x.reply.model}",', ' "answers": {', '  "runbook": {'
 lines = [l if len(l) <= 76 else l.replace(', "exchange', ',\n      "exchange') for l in lines]
 text = "\n".join(lines)
 assert all(len(l) <= 76 for l in text.split("\n")), text
-emit('<pre class="code plain"><code>' + esc(text) + "</code></pre>")
+emit(pre(text, "reply to POST /v1/systemone", "systemone-example.json"))
 @end
 
 The reply to that request took {{R.example.ms}} ms for both questions together. Three things in it need explaining.

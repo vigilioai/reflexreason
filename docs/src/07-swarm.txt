@@ -73,9 +73,9 @@ emit(table(["Agents in flight", "Wall s", "Peak RSS MB", "Peak heap MB", "Heap K
            rows, num=(0, 1, 2, 3, 4, 5),
            caption="One Node process (" + s.node + "), measured by scripts/60-bench.sh swarm."))
 emit(hbar([("idle, after warm-up", s.idle_rss_mb, 2)] +
-          [(f"{r.agents:,} agents in flight", r.rss_peak_mb, 1) for r in s.rows],
+          [(f"{r.agents:,} agent{'s' if r.agents > 1 else ''} in flight", r.rss_peak_mb, 1) for r in s.rows],
           "MB", "{:.0f}",
-          claim=f"Peak resident memory of the swarm process. A thousand concurrent agents add {sw(1000).rss_peak_mb - s.idle_rss_mb:.0f} MB to an idle process of {s.idle_rss_mb:.0f} MB."))
+          src="bench/results/swarm-mem.json", claim=f"Peak resident memory of the swarm process. A thousand concurrent agents add {sw(1000).rss_peak_mb - s.idle_rss_mb:.0f} MB to an idle process of {s.idle_rss_mb:.0f} MB."))
 @end
 
 The process idles at {{R.swarm.idle_rss_mb|.0f}} MB, which is Node, the MCP client and the A2A client. With a thousand agents in flight it peaks at {{sw(1000).rss_peak_mb|.0f}} MB. The marginal cost settles at about {{sw(1000).heap_kb_per_agent|.0f}} KB of heap per agent. The first rows show a higher figure per agent only because a fixed overhead is being divided by a small number.

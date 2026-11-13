@@ -5,7 +5,7 @@
 One shell script builds everything, and the directory names say which language owns which job. TypeScript holds every agent and every protocol. Rust holds three programs and one library, each of which exists because of a measurement in ((ch-rust)).
 
 @py
-tree = """reflex-reason/
+tree = """holsti/
   build.sh                 the whole build: test, compile, bundle, package
   rust/crates/
     sift/                  log distiller (library, no dependencies)
@@ -32,18 +32,19 @@ tree = """reflex-reason/
   scripts/                 numbered: cluster, deploy, inject, run, measure
   bench/                   benchmark harnesses and results/
   fixtures/                labelled states for the decision benchmark
-  docs/                    this tutorial and its generator"""
+  docs/                    this tutorial, its generator, fonts/, images/"""
 import pathlib
 root = pathlib.Path(RES).parent.parent
 for path in ["build.sh", "rust/crates/sift", "rust/crates/intake",
              "rust/crates/vllm-gate", "rust/crates/rusage", "ts/skills",
              "runbooks", "deploy/scenarios", "deploy/k8s", "deploy/docker",
-             "deploy/sam", "scripts", "bench/results", "fixtures", "docs"] + [
+             "deploy/sam", "scripts", "bench/results", "fixtures", "docs",
+             "docs/fonts", "docs/images"] + [
              f"ts/src/{d}" for d in ["intake", "kube", "mcp", "reflex", "rag",
              "swarm", "reason", "a2a", "mock", "eval", "bench"]]:
     assert (root / path).exists(), path
 assert all(len(l) <= 76 for l in tree.split("\n"))
-emit('<pre class="code plain"><code>' + esc(tree) + "</code></pre>")
+emit(pre(tree, "holsti/", "the package", kind="tree"))
 @end
 
 ### s-prereq | What the machine needs
@@ -117,7 +118,7 @@ This is the output of <code>IMAGES=1 ./build.sh</code> in a freshly extracted co
 @py
 lines = [l.rstrip() for l in R.build.log]
 assert all(len(l) <= 76 for l in lines), [l for l in lines if len(l) > 76]
-emit('<pre class="code plain"><code>' + esc("\n".join(lines)) + "</code></pre>")
+emit(pre("\n".join(lines), "IMAGES=1 ./build.sh", "build.json", kind="shell"))
 @end
 
 ### s-build-broke | What broke, and how each break shows itself

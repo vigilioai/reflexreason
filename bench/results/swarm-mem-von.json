@@ -1,0 +1,43 @@
+{
+ "idle_rss_mb": 79.6,
+ "idle_heap_mb": 11.4,
+ "node": "v22.23.4",
+ "rows": [
+  {
+   "agents": 1,
+   "wall_ms": 3867,
+   "incidents_per_s": 0.3,
+   "acted": 1,
+   "rss_before_mb": 79.6,
+   "rss_peak_mb": 80,
+   "heap_before_mb": 11.4,
+   "heap_peak_mb": 12.6,
+   "heap_kb_per_agent": 1297,
+   "rss_kb_per_agent": 404
+  },
+  {
+   "agents": 16,
+   "wall_ms": 27643,
+   "incidents_per_s": 0.6,
+   "acted": 16,
+   "rss_before_mb": 80,
+   "rss_peak_mb": 81.1,
+   "heap_before_mb": 11.7,
+   "heap_peak_mb": 15.1,
+   "heap_kb_per_agent": 214.4,
+   "rss_kb_per_agent": 66.5
+  },
+  {
+   "agents": 100,
+   "wall_ms": 156814,
+   "incidents_per_s": 0.6,
+   "acted": 100,
+   "rss_before_mb": 81,
+   "rss_peak_mb": 109.6,
+   "heap_before_mb": 12.2,
+   "heap_peak_mb": 32,
+   "heap_kb_per_agent": 202.8,
+   "rss_kb_per_agent": 293.6
+  }
+ ]
+}

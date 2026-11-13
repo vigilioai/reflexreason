@@ -1,19 +1,34 @@
-# Reflex and Reason 1.0
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/holsti-logo-dark.svg">
+    <img src="docs/images/holsti-logo.svg" alt="Holsti" width="420">
+  </picture>
+</p>
 
-An on-call triage system for a Kubernetes cluster. A decision model on CPU
-matches a fault to a runbook, a guarded MCP tool applies the fix, and **a
-language model is consulted only when nothing known fits**. The agents are
-TypeScript. Three small Rust programs sit where measurements said they had
-to: a front door for alert bursts, a proxy in front of vLLM, and a helper
-that measures cold starts.
+# Holsti: reflex and reason for 24x7 operations
 
-Architecture:
-![Architecture is available in docs/images/architecture.png](docs/images/architecture.png)
-Latency:
-![Latency details in docs/images/latency.png](docs/images/latency.png)
+Most decisions that keep an industrial operation running around the clock, in a factory, a trading system or a compute cluster, need very little language AI. Deterministic programs watch stability, runbooks say what to do, and agents apply them. A language model is needed only for the rare failure nobody has seen before. In this project's ten synthetic fault scenarios, 1 of 12 incidents needed one.
+
+Holsti is named after the Taiwan yellow tit (*Machlolophus holsti*, [黃山雀](https://en.wikipedia.org/wiki/Yellow_tit), huáng shānquè), a bird found only in the mountains of Taiwan. It lives only in the forest it is suited to and cannot use marginal habitat. Outside the breeding season it joins mixed-species flocks, and in Taiwan's mountain forests these flocks have leader species that are the first to sound the alarm when a predator is near.
+
+Each Holsti agent works like the bird. It handles one incident, acts only within the runbooks it knows, and hands everything else to a language model or a person. The deterministic monitors already running the operation play the leader species: they raise the alarm, and the agent then fetches the evidence itself before it acts.
+
+Every layer of protection has holes, and sometimes the holes line up (the Swiss cheese model). What gets through is the rare failure that every risk assessment rated as nearly impossible. Holsti is a reference design for practitioners and researchers to find out what their environment actually needs, how to contain the non-determinism of LLM-based components, and how to build a pipeline in which failures stay small.
+
+Version 1.0 is a group of solitary birds: every agent works alone and never hears the others. The next step is a flock, in which agents broadcast the evidence they see, a common cause across many workloads becomes one incident, and only signals calibrated as reliable are followed.
+
+The reference implementation is an on-call triage system for a Kubernetes cluster that runs a stand-in for a trading stack. A decision model on CPU matches a fault to a runbook, a guarded MCP tool applies the fix, and **a language model is consulted only when nothing known fits**. The agents are TypeScript. Three small Rust programs sit where measurements said they had to: a front door for alert bursts, a proxy in front of vLLM, and a helper that measures cold starts.
+
+## Architecture
+
+![Holsti architecture diagram](docs/images/architecture.png)
+
+## Latency
+
+![Measured latency of each step](docs/images/latency.png)
 
 The full explanation, with every listing and every number, is
-`docs/reflex-reason-tutorial.html`.
+`docs/holsti-tutorial.html`.
 
 ## Quick start (no GPU needed)
 

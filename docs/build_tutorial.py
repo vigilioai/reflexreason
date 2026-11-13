@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build docs/reflex-reason-tutorial.html from docs/src/*.txt.
+"""Build docs/holsti-tutorial.html from docs/src/*.txt.
 
 Nothing in the text is typed twice. Numbers are {{...}} expressions that are
 evaluated against bench/results/*.json, listings are cut from the real source
@@ -26,6 +26,7 @@ Inline: {{expr|format}} for a number, [[term|text]] for a background note,
 ((id)) for a linked section number.
 """
 
+import base64
 import html
 import json
 import pathlib
@@ -36,9 +37,12 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SRC = ROOT / "docs" / "src"
 RES = ROOT / "bench" / "results"
-OUT = ROOT / "docs" / "reflex-reason-tutorial.html"
-TITLE = "Reflex and Reason"
-VERSION = "1.0"
+OUT = ROOT / "docs" / "holsti-tutorial.html"
+FONTS = ROOT / "docs" / "fonts"
+IMAGES = ROOT / "docs" / "images"
+TITLE = "Holsti"
+TAGLINE = "Reflex and reason for 24x7 operations"
+VERSION = "1.0.2"
 MAXCOL = 76
 errors = []
 
@@ -162,154 +166,205 @@ def can(verb, resource, namespace="trading"):
 
 # ----------------------------------------------------------------- charts
 
-INK2 = "#57514a"
-SERIES = {0: "#2a78d6", 1: "#eb6834", 2: "#e6dfcf"}
+INK = "#111318"
+INK2 = "#4f5563"
+NAVY = "#22305e"
+PAPER = "#ffffff"
+SANS = "Geist, ui-sans-serif, system-ui, Helvetica, Arial, sans-serif"
+MONO = "'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace"
 chart_count = 0
+
+# Advance widths of Geist 400 and 600 for ASCII 32 to 126, in thousandths of
+# an em, read from docs/fonts with fontTools. Labels are sized with them, so
+# no text in a chart is measured by guesswork or clipped.
+GEIST = {
+    400: [250, 217, 360, 478, 649, 770, 622, 188, 313, 313, 436, 570, 203,
+          426, 203, 483, 672, 385, 619, 613, 636, 626, 624, 585, 604, 624,
+          293, 293, 549, 660, 553, 567, 914, 672, 681, 702, 703, 604, 591,
+          709, 704, 272, 598, 653, 581, 878, 739, 748, 651, 742, 673, 649,
+          578, 690, 670, 912, 629, 631, 543, 337, 478, 337, 402, 564, 252,
+          576, 599, 553, 599, 568, 399, 598, 582, 246, 261, 591, 284, 878,
+          582, 580, 599, 599, 383, 531, 397, 576, 538, 820, 587, 538, 550,
+          424, 264, 424, 538],
+    600: [236, 243, 378, 552, 669, 817, 680, 195, 336, 336, 429, 559, 227,
+          423, 227, 510, 689, 428, 642, 640, 665, 656, 648, 592, 646, 651,
+          304, 304, 541, 636, 545, 586, 945, 719, 696, 720, 714, 616, 600,
+          727, 713, 291, 617, 688, 586, 903, 745, 765, 665, 759, 689, 669,
+          614, 699, 717, 965, 689, 674, 579, 368, 506, 368, 414, 565, 261,
+          605, 624, 586, 624, 596, 432, 623, 601, 270, 308, 629, 313, 893,
+          601, 608, 624, 624, 412, 562, 431, 597, 586, 840, 630, 571, 581,
+          429, 285, 429, 527],
+}
+
+
+def text_w(text, size, weight=400):
+    """Width in pixels of `text` set in Geist at `size`."""
+    adv = GEIST[weight]
+    return size * sum(
+        adv[ord(c) - 32] if 32 <= ord(c) < 127 else 700 for c in text
+    ) / 1000
 
 
 def esc(text):
     return html.escape(str(text), quote=True)
 
 
-def hbar(rows, unit, fmt="{:.1f}", legend=None, label_w=None, claim=""):
+def window(title, body, meta="", kind="", caption=""):
+    """A window in the 1996 manner: a title bar, a body, a status line.
+
+    The bar is plain text in the markup, so a reader without the style
+    sheet still sees the title and its meta line above the body.
+    """
+    meta = f' <span class="wm">{meta}</span>' if meta else ""
+    caption = f"<figcaption>{caption}</figcaption>" if caption else ""
+    return (
+        f'<figure class="win {kind}"><div class="bar"><span class="wt">'
+        f"{title}</span>{meta}</div>{body}{caption}</figure>"
+    )
+
+
+def pre(text, title, meta="", kind="data"):
+    """Program output or a record, in a window titled with its source."""
+    body = f'<pre class="code plain"><code>{esc(text)}</code></pre>'
+    return window(esc(title), body, esc(meta), kind)
+
+
+def hbar(rows, unit, fmt="{:.1f}", legend=None, label_w=None, claim="",
+         src=""):
     """Horizontal bars with a label and a value on every bar.
 
-    rows: (label, value, series). Series 0 is solid blue, 1 is hatched
-    orange, 2 is a pale outlined bar, so the three stay apart on a
-    greyscale screen and never depend on colour alone.
+    rows: (label, value, series). Series 0 is solid navy, 1 is a one-bit
+    checkerboard dither, 2 is an outlined white bar, so the three stay apart
+    on a greyscale screen and never depend on colour alone. `src` names the
+    result file in the window's title bar.
     """
     global chart_count
     chart_count += 1
-    pid = f"hatch{chart_count}"
+    pid = f"dither{chart_count}"
     width, pitch, bar_h = 680, 26, 14
     if label_w is None:
-        label_w = min(330, max(len(r[0]) for r in rows) * 6.5 + 18)
+        label_w = min(330, max(text_w(r[0], 12) for r in rows) + 18)
     top = 30 if legend else 8
     height = top + len(rows) * pitch + 6
     span = width - label_w - 118
     peak = max(r[1] for r in rows) or 1
     out = [
         f'<svg viewBox="0 0 {width} {height}" role="img" '
-        f'aria-label="{esc(claim)}" font-family="ui-sans-serif, '
-        f'system-ui, Helvetica, Arial, sans-serif" font-size="12">',
-        f'<defs><pattern id="{pid}" width="6" height="6" '
-        f'patternUnits="userSpaceOnUse" patternTransform="rotate(45)">'
-        f'<rect width="6" height="6" fill="{SERIES[1]}"/>'
-        f'<line x1="0" y1="0" x2="0" y2="6" stroke="#7a2c08" '
-        f'stroke-width="2"/></pattern></defs>',
+        f'aria-label="{esc(claim)}" font-family="{SANS}" font-size="12">',
+        f'<defs><pattern id="{pid}" width="3" height="3" '
+        f'patternUnits="userSpaceOnUse"><rect width="3" height="3" '
+        f'fill="{PAPER}"/><rect width="1.5" height="1.5" fill="{NAVY}"/>'
+        f'<rect x="1.5" y="1.5" width="1.5" height="1.5" fill="{NAVY}"/>'
+        f"</pattern></defs>",
     ]
 
     def paint(series):
         if series == 1:
-            return f'fill="url(#{pid})"'
+            return f'fill="url(#{pid})" stroke="{NAVY}" stroke-width="1"'
         if series == 2:
-            return f'fill="{SERIES[2]}" stroke="{INK2}" stroke-width="1"'
-        return f'fill="{SERIES[0]}"'
+            return f'fill="{PAPER}" stroke="{NAVY}" stroke-width="1"'
+        return f'fill="{NAVY}"'
 
     if legend:
         x = label_w
         for series, name in legend:
             out.append(
-                f'<rect x="{x}" y="6" width="12" height="12" '
+                f'<rect x="{x + 0.5}" y="6.5" width="11" height="11" '
                 f"{paint(series)}/>"
             )
             out.append(
                 f'<text x="{x + 17}" y="16" fill="currentColor">'
                 f"{esc(name)}</text>"
             )
-            x += 17 + len(name) * 6.4 + 22
+            x += 17 + text_w(name, 12) + 22
     for i, (label, value, series) in enumerate(rows):
         y = top + i * pitch
         w = max(1.5, span * value / peak)
         shown = f"{fmt.format(value)} {unit}".strip()
         out.append(
-            f'<text x="{label_w - 8}" y="{y + 11}" '
+            f'<text x="{label_w - 10}" y="{y + 11}" '
             f'text-anchor="end" fill="currentColor">{esc(label)}'
             f"</text>"
         )
         x1 = label_w + w
-        if w >= 8:
-            d = (
-                f"M{label_w} {y}H{x1 - 4:.1f}Q{x1:.1f} {y} {x1:.1f} {y + 4}"
-                f"V{y + bar_h - 4}Q{x1:.1f} {y + bar_h} {x1 - 4:.1f} "
-                f"{y + bar_h}H{label_w}Z"
-            )
-            mark = f'<path d="{d}" {paint(series)}>'
-        else:
-            mark = (
-                f'<rect x="{label_w}" y="{y}" width="{w:.1f}" '
-                f'height="{bar_h}" {paint(series)}>'
-            )
+        inset = 0.5 if series else 0
         out.append(
-            f"{mark}<title>{esc(label)}: {esc(shown)}</title>"
-            f'{"</path>" if w >= 8 else "</rect>"}'
+            f'<rect x="{label_w + inset}" y="{y + inset}" '
+            f'width="{max(0.5, w - 2 * inset):.1f}" '
+            f'height="{bar_h - 2 * inset}" {paint(series)}>'
+            f"<title>{esc(label)}: {esc(shown)}</title></rect>"
         )
         out.append(
-            f'<text x="{x1 + 6:.1f}" y="{y + 11}" '
-            f'fill="currentColor">{esc(shown)}</text>'
+            f'<text x="{x1 + 7:.1f}" y="{y + 11}" font-family="{MONO}" '
+            f'font-size="11.5" fill="currentColor">{esc(shown)}</text>'
         )
     out.append(
         f'<line x1="{label_w}" y1="{top - 3}" x2="{label_w}" '
         f'y2="{height - 4}" stroke="currentColor" '
-        f'stroke-width="1"/></svg>'
+        f'stroke-width="1.5"/></svg>'
     )
-    return (
-        f'<figure class="chart">{"".join(out)}'
-        f"<figcaption>{claim}</figcaption></figure>"
-    )
+    return window(esc(src or "chart"), "".join(out), "", "chart", claim)
 
 
 def pipeline(steps, claim, below=None):
-    """A row of boxes joined by arrows: (title, [subtitle lines])."""
+    """A row of small windows joined by arrows: (title, [subtitle lines])."""
     global chart_count
     chart_count += 1
     mid = f"arrow{chart_count}"
-    width, gap = 700, 22
-    box_h = 36 + 12.5 * max(len(lines) for _, lines in steps)
+    width, gap, bar, shadow = 700, 20, 20, 3
     n = len(steps)
-    box_w = (width - (n - 1) * gap) / n
+    box_w = (width - (n - 1) * gap) / n - shadow
+    widest = max(text_w(l, 1) for _, lines in steps for l in lines)
+    size = min(10.5, round((box_w - 8) / widest, 2))
+    box_h = bar + 12 + (size + 2) * max(len(lines) for _, lines in steps)
     extra = 0 if not below else 16 + 13 * max(len(b) for b in below)
-    height = box_h + 12 + extra
+    height = 6 + box_h + shadow + 6 + extra
     out = [
-        f'<svg viewBox="0 0 {width} {height}" role="img" '
-        f'aria-label="{esc(claim)}" font-family="ui-sans-serif, '
-        f'system-ui, Helvetica, Arial, sans-serif">',
+        f'<svg viewBox="0 0 {width} {height:.1f}" role="img" '
+        f'aria-label="{esc(claim)}" font-family="{SANS}">',
         f'<defs><marker id="{mid}" viewBox="0 0 10 10" refX="9" refY="5" '
         f'markerWidth="7" markerHeight="7" orient="auto">'
         f'<path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>',
     ]
     for i, (title, lines) in enumerate(steps):
-        x = i * (box_w + gap)
+        x = i * (box_w + shadow + gap)
         cx = x + box_w / 2
         out.append(
-            f'<rect x="{x + 0.6:.1f}" y="6" width="{box_w - 1.2:.1f}" '
-            f'height="{box_h}" rx="6" fill="#efe9db" '
-            f'stroke="currentColor" stroke-width="1.2"/>'
+            f'<rect x="{x + shadow:.1f}" y="{6 + shadow}" width="{box_w:.1f}" '
+            f'height="{box_h:.1f}" fill="currentColor"/>'
+            f'<rect x="{x + 0.75:.1f}" y="6.75" width="{box_w - 1.5:.1f}" '
+            f'height="{box_h - 1.5:.1f}" fill="{PAPER}" stroke="currentColor" '
+            f'stroke-width="1.5"/>'
+            f'<rect x="{x + 0.75:.1f}" y="6.75" width="{box_w - 1.5:.1f}" '
+            f'height="{bar}" fill="{NAVY}" stroke="currentColor" '
+            f'stroke-width="1.5"/>'
         )
         out.append(
-            f'<text x="{cx:.1f}" y="25" text-anchor="middle" '
-            f'font-size="12.5" font-weight="700" '
-            f'fill="currentColor">{esc(title)}</text>'
+            f'<text x="{cx:.1f}" y="{6 + 14.5}" text-anchor="middle" '
+            f'font-size="12" font-weight="600" fill="{PAPER}">'
+            f"{esc(title)}</text>"
         )
         for k, line in enumerate(lines):
             out.append(
-                f'<text x="{cx:.1f}" y="{40 + k * 12.5}" '
-                f'text-anchor="middle" font-size="10.5" '
+                f'<text x="{cx:.1f}" y="{6 + bar + 15 + k * (size + 2):.1f}" '
+                f'text-anchor="middle" font-size="{size}" '
                 f'fill="currentColor">{esc(line)}</text>'
             )
         if i < n - 1:
+            y = 6 + bar + (box_h - bar) / 2
             out.append(
-                f'<line x1="{x + box_w + 2:.1f}" y1="{6 + box_h / 2:.1f}" '
-                f'x2="{x + box_w + gap - 3:.1f}" y2="{6 + box_h / 2:.1f}" '
-                f'stroke="currentColor" stroke-width="1.4" '
+                f'<line x1="{x + box_w + shadow + 1:.1f}" y1="{y:.1f}" '
+                f'x2="{x + box_w + shadow + gap - 2:.1f}" y2="{y:.1f}" '
+                f'stroke="currentColor" stroke-width="1.5" '
                 f'marker-end="url(#{mid})"/>'
             )
         if below:
             for k, line in enumerate(below[i]):
                 out.append(
-                    f'<text x="{cx:.1f}" y="{box_h + 24 + k * 13}" '
-                    f'text-anchor="middle" font-size="10.5" '
-                    f'fill="currentColor">{esc(line)}</text>'
+                    f'<text x="{cx:.1f}" '
+                    f'y="{6 + box_h + shadow + 18 + k * 13:.1f}" '
+                    f'text-anchor="middle" font-family="{MONO}" '
+                    f'font-size="10" fill="currentColor">{esc(line)}</text>'
                 )
     out.append("</svg>")
     return (
@@ -383,6 +438,7 @@ NS = {
     "can": can,
     "hbar": hbar,
     "pipeline": pipeline,
+    "pre": pre,
     "table": table,
     "esc": esc,
     "med": statistics.median,
@@ -525,20 +581,27 @@ def listing(spec):
     width_check(cut, f"{path} from line {first + 1}")
     hash_style = path.endswith(HASH_COMMENT) or "/" not in path
     mark = re.compile(r"^\s*#" if hash_style else r"^\s*(//|/\*|\*)")
-    body = "\n".join(
+    shown = [
         f'<span class="c">{esc(l)}</span>' if mark.match(l) else esc(l)
         for l in cut
+    ]
+    # One span per line, each ending in its own newline, so the numbers in
+    # the gutter come from a CSS counter and are never copied with the code.
+    body = "".join(
+        f'<span class="l">{l}{"" if k == len(shown) - 1 else chr(10)}</span>'
+        for k, l in enumerate(shown)
     )
     span = (
         f"line {first + 1}"
         if first == last
         else f"lines {first + 1} to {last + 1}"
     )
-    return (
-        f'<figure class="listing"><figcaption><code>{esc(path)}</code>, '
-        f'{span}</figcaption><pre class="code"><code>{body}</code></pre>'
-        f"</figure>"
+    wide = " g4" if last + 1 >= 1000 else ""
+    code = (
+        f'<pre class="code lined{wide}"><code style="counter-reset: ln '
+        f'{first}">{body}</code></pre>'
     )
+    return window(f"<code>{esc(path)}</code>", code, span, "listing")
 
 
 def quiz(lines):
@@ -561,7 +624,10 @@ def quiz(lines):
     for q, (question, options) in enumerate(questions, 1):
         if sum(1 for o in options if o[0]) != 1:
             fail(f"{state['where']}: question {q} needs exactly one answer")
-        out.append(f'<li id="q-{chapter}-{q}"><p>{question}</p><ul>')
+        out.append(
+            f'<li id="q-{chapter}-{q}"><p><span class="qn">{chapter}.{q}'
+            f"</span> {question}</p><ul>"
+        )
         for k, (_, text, _) in enumerate(options):
             letter = chr(65 + k)
             out.append(
@@ -637,7 +703,7 @@ def render(sources):
                 if level == "##":
                     close_chapter()
                     state.update(chapter=hid, label=f"{kind} {num}")
-                    word = "Appendix " if kind == "appendix" else ""
+                    word = "Appendix " if kind == "appendix" else "Chapter "
                     out.append(
                         f'<section class="chapter"><h2 id="{hid}">'
                         f'<span class="num">{word}{num}</span> '
@@ -653,9 +719,9 @@ def render(sources):
             elif line.startswith("@code "):
                 flush()
                 out.append(listing(line[6:]))
-            elif line.strip() in ("@pre", "@py", "@quiz"):
+            elif line.strip() in ("@py", "@quiz") or line.startswith("@pre"):
                 flush()
-                kind = line.strip()
+                kind, _, title = line.strip().partition(" ")
                 j = i + 1
                 while j < len(lines) and lines[j].strip() != "@end":
                     j += 1
@@ -664,11 +730,8 @@ def render(sources):
                 body = lines[i + 1 : j]
                 if kind == "@pre":
                     width_check(body, f"{name}:{i + 1} @pre")
-                    out.append(
-                        '<pre class="code plain"><code>'
-                        + esc("\n".join(body))
-                        + "</code></pre>"
-                    )
+                    out.append(pre("\n".join(body), title or "shell",
+                                   kind="shell"))
                 elif kind == "@py":
                     local = dict(NS, emit=out.append, inline=inline)
                     try:
@@ -720,19 +783,27 @@ def answers():
         for q, (_, options) in enumerate(questions, 1):
             for k, (right, text, why) in enumerate(options):
                 letter = chr(65 + k)
-                verdict = "Correct." if right else "Not this one."
+                verdict = (
+                    '<b class="ok">Correct.</b>'
+                    if right
+                    else '<b class="no">Not this one.</b>'
+                )
                 out.append(
                     f'<div class="ans" id="ans-{chapter}-{q}-'
-                    f'{letter.lower()}"><p><b>Question {chapter}.{q}, '
-                    f"option {letter}.</b> {text}</p><p><b>{verdict}</b> "
-                    f'{why}</p><p class="back"><a href="#q-{chapter}-{q}">'
-                    f"Back to question {chapter}.{q}</a></p></div>"
+                    f'{letter.lower()}"><div class="dlg"><p><b>Question '
+                    f"{chapter}.{q}, option {letter}.</b> {text}</p><p>"
+                    f'{verdict} {why}</p><p class="back"><a class="btn" '
+                    f'href="#q-{chapter}-{q}">Back to question {chapter}.{q}'
+                    f"</a></p></div></div>"
                 )
     return "".join(out)
 
 
 def toc():
-    out = ['<nav id="toc"><h2>Contents</h2><ol>']
+    out = [
+        '<nav id="toc" class="win"><h2 class="bar"><span class="wt">'
+        'Contents</span></h2><ol>'
+    ]
     for hid in order:
         kind, num, title = numbers[hid]
         subs = [
@@ -753,126 +824,477 @@ def toc():
 
 # -------------------------------------------------------------------- css
 
+# Holsti's desktop: one yellow band with a dithered mountain ridge, a white
+# document window on a dotted desktop, and navy-titled windows for code,
+# data and charts. Geist is for reading, VT323 for window chrome, JetBrains
+# Mono for data. The palette is the bird's: navy hood, yellow body.
 TOKENS = {
-    "paper": "#f7f3ea",
-    "ink": "#1f1c17",
+    "desk": "#e9ebef",
+    "dots": "#cfd3db",
+    "paper": PAPER,
+    "ink": INK,
     "ink2": INK2,
-    "rule": "#d6cebd",
-    "wash": "#efe9db",
-    "link": "#1b4a86",
-    "mark": "#fff3c4",
+    "ink3": "#8b909b",
+    "rule": "#d6d9e0",
+    "wash": "#f0f1f4",
+    "navy": NAVY,
+    "yellow": "#f6d23c",
+    "link": "#1d3ec7",
+    "mark": "#fff0a6",
+    "sans": SANS,
+    "mono": MONO,
+    "pixel": "VT323, " + MONO,
 }
+# (family, weight, file, copyright line): all four are under the SIL Open
+# Font License 1.1, whose text is in docs/fonts/
+FACES = [
+    ("Geist", 400, "geist-sans-latin-400-normal.woff2",
+     "Geist (C) 2023 Vercel, with basement.studio"),
+    ("Geist", 600, "geist-sans-latin-600-normal.woff2",
+     "Geist (C) 2023 Vercel, with basement.studio"),
+    ("JetBrains Mono", 400, "jetbrains-mono-latin-400-normal.woff2",
+     "JetBrains Mono (C) 2020 The JetBrains Mono Project Authors"),
+    ("VT323", 400, "vt323-latin-400-normal.woff2",
+     "VT323 (C) 2011 The VT323 Project Authors"),
+]
 CSS = """
 :root { color-scheme: light; TOKENS }
 html { -webkit-text-size-adjust: 100%; }
 body {
   margin: 0;
-  background: var(--paper);
+  background-color: var(--desk);
+  background-image: radial-gradient(var(--dots) 0.9px, transparent 1.4px);
+  background-size: 7px 7px;
   color: var(--ink);
-  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  font-family: var(--sans);
   font-size: 17px;
-  line-height: 1.6;
+  line-height: 1.62;
 }
-.page {
-  max-width: 700px;
+::selection { background: var(--yellow); color: var(--ink); }
+
+.hero {
+  position: relative;
+  background-color: var(--yellow);
+  background-image: url("RIDGE");
+  background-repeat: repeat-x;
+  background-position: center bottom;
+  background-size: 1600px 192px;
+  image-rendering: pixelated;
+  border-bottom: 2px solid var(--ink);
+}
+.hero-in {
+  max-width: 820px;
   margin: 0 auto;
-  padding-block: 28px 80px;
+  padding-block: 30px 150px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 22px 32px;
+}
+.hero-text { min-width: 0; flex: 1 1 320px; }
+.kicker { margin: 0 0 18px; }
+.tag {
+  display: inline-block;
+  background: var(--ink);
+  color: var(--paper);
+  font: 400 19px/1 var(--pixel);
+  letter-spacing: 0.03em;
+  padding: 4px 8px 3px;
+}
+.hero h1 {
+  font-size: clamp(52px, 15vw, 136px);
+  font-weight: 600;
+  line-height: 0.86;
+  letter-spacing: -0.055em;
+  margin: 0 0 16px -0.05em;
+}
+.tagline {
+  font-size: clamp(19px, 2.7vw, 25px);
+  line-height: 1.25;
+  letter-spacing: -0.012em;
+  max-width: 19em;
+  margin: 0;
+}
+.win.bird { flex: none; width: 176px; margin: 4px 0 0; }
+.bird-body { display: block; padding: 12px; background: var(--paper); }
+.bird-body svg { display: block; width: 100%; height: auto; }
+
+.page {
+  position: relative;
+  max-width: 780px;
+  margin: -96px auto 56px;
+  background: var(--paper);
+  border: 1.5px solid var(--ink);
+  box-shadow: 6px 6px 0 var(--ink);
+}
+.doc {
+  padding-block: 28px 72px;
   padding-left: max(16px, env(safe-area-inset-left, 0px));
   padding-right: max(16px, env(safe-area-inset-right, 0px));
 }
-h1 { font-size: 2.1em; line-height: 1.15; margin: 0.4em 0 0.2em; }
-h2 { font-size: 1.5em; line-height: 1.25; margin: 0 0 0.6em; }
-h3 { font-size: 1.15em; margin: 2em 0 0.5em; }
-h4 { font-size: 1em; margin: 0 0 0.4em; }
-.num { color: var(--ink2); font-weight: 400; margin-right: 0.3em; }
-p { margin: 0 0 0.95em; }
-a { color: var(--link); text-decoration: underline; }
-a.term { text-decoration-style: dotted; }
-.lede { font-size: 1.08em; color: var(--ink2); }
-.chapter {
-  border-top: 2px solid var(--ink);
-  margin-top: 3.2em;
-  padding-top: 1.1em;
-  page-break-before: always;
+@media (min-width: 640px) {
+  .doc { padding-left: 40px; padding-right: 40px; }
 }
+@media (max-width: 812px) {
+  .page { margin-left: 0; margin-right: 0; box-shadow: none; }
+}
+@media (max-width: 560px) {
+  .page { border-left: 0; border-right: 0; margin-top: -72px; }
+  .hero-in { flex-wrap: nowrap; gap: 14px; padding-block: 22px 124px; }
+  .win.bird { width: 116px; }
+  .bird-body { padding: 6px; }
+  .win.bird .bar { font-size: 17px; padding-right: 6px; }
+  .bar .opt { display: none; }
+}
+
+h1, h2, h3, h4 { font-weight: 600; text-wrap: balance; }
+h2 { font-size: 30px; line-height: 1.1; letter-spacing: -0.03em; }
+h3 {
+  font-size: 22px;
+  line-height: 1.25;
+  letter-spacing: -0.015em;
+  margin: 2.1em 0 0.6em;
+}
+h4 { font-size: 18px; letter-spacing: -0.01em; margin: 0 0 0.4em; }
+h3 .num {
+  font: 400 13px/1 var(--mono);
+  letter-spacing: 0;
+  border: 1.5px solid var(--ink);
+  padding: 3px 5px 2px;
+  margin-right: 10px;
+  vertical-align: 3px;
+}
+p { margin: 0 0 1em; }
+a {
+  color: var(--link);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2.5px;
+}
+a.term { text-decoration-style: dotted; text-decoration-thickness: 1.5px; }
+a:hover { background: var(--yellow); color: var(--ink); }
+a:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+  background: var(--yellow);
+  color: var(--ink);
+}
+.lede { font-size: 19px; line-height: 1.5; letter-spacing: -0.006em; }
+.meta { font: 13px/1.65 var(--mono); color: var(--ink2); }
+
+.chapter { margin-top: 76px; page-break-before: always; }
+.chapter::before {
+  content: "";
+  display: block;
+  height: 10px;
+  margin-bottom: 30px;
+  border-top: 3px solid var(--ink);
+  background: conic-gradient(var(--ink) 25%, transparent 0 50%, var(--ink) 0 75%, transparent 0) 0 0 / 4px 4px;
+}
+.chapter h2 {
+  font-size: clamp(32px, 5.6vw, 46px);
+  line-height: 1.02;
+  letter-spacing: -0.04em;
+  margin: 0 0 24px;
+}
+.chapter h2 .num {
+  display: table;
+  font: 400 19px/1 var(--pixel);
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  background: var(--ink);
+  color: var(--paper);
+  padding: 4px 8px 3px;
+  margin: 0 0 14px;
+}
+
 code {
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  font-size: 0.86em;
+  font-family: var(--mono);
+  font-size: 0.84em;
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
 }
-pre.code {
+p code, li code, td code, dd code, dt code, caption code {
   background: var(--wash);
-  border: 1px solid var(--rule);
-  border-radius: 4px;
-  padding: 10px 12px;
-  margin: 0 0 1em;
-  overflow-x: auto;
-  line-height: 1.42;
-  font-size: 13px;
-  white-space: pre;
+  padding: 1px 4px;
+  overflow-wrap: anywhere;
 }
-pre.code code { font-size: inherit; }
-pre.code .c { color: var(--ink2); }
-figure { margin: 1.3em 0; }
-figure.listing figcaption { margin: 0 0 4px; }
-figcaption { font-size: 0.86em; color: var(--ink2); margin-top: 6px; }
-svg { display: block; width: 100%; height: auto; color: var(--ink); }
-.scroll { overflow-x: auto; margin: 0 0 1.1em; }
-table { border-collapse: collapse; font-size: 0.88em; width: 100%; }
-caption {
-  text-align: left;
-  font-size: 0.97em;
-  color: var(--ink2);
-  padding-bottom: 6px;
+
+.win {
+  margin: 1.6em 0 1.9em;
+  background: var(--paper);
+  border: 1.5px solid var(--ink);
+  box-shadow: 4px 4px 0 var(--ink);
 }
-th, td {
-  border-bottom: 1px solid var(--rule);
-  padding: 5px 10px 5px 0;
-  text-align: left;
-  vertical-align: top;
-}
-th { border-bottom: 1.5px solid var(--ink); font-weight: 700; }
-.n { text-align: right; font-variant-numeric: tabular-nums; }
-#toc { margin: 2em 0; }
-#toc h2 { font-size: 1.1em; margin-bottom: 0.4em; }
-#toc ol { list-style: none; margin: 0; padding: 0; }
-#toc ol > li { margin: 0 0 0.45em; }
-#toc ul {
-  list-style: none;
+.bar {
+  position: relative;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 14px;
   margin: 0;
-  padding: 0 0 0 1.4em;
-  font-size: 0.86em;
+  padding: 1px 10px 0 30px;
+  background: var(--navy);
+  color: var(--paper);
+  border-bottom: 1.5px solid var(--ink);
+  font: 400 19px/24px var(--pixel);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.bar::before {
+  content: "";
+  position: absolute;
+  left: 9px;
+  top: 7px;
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid var(--paper);
+  background: var(--yellow);
+}
+.bar .wt { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.bar .wm { flex: none; opacity: 0.8; }
+.bar code { font: inherit; background: none; padding: 0; }
+.win.shell .bar { background: var(--ink); }
+.win > figcaption {
+  margin: 0;
+  padding: 8px 12px 9px;
+  border-top: 1.5px solid var(--ink);
+  background: var(--wash);
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--ink2);
+}
+.win.chart svg { padding: 14px 16px 8px; box-sizing: border-box; }
+
+pre.code {
+  margin: 0;
+  padding: 12px 14px;
+  overflow-x: auto;
+  background-color: var(--paper);
+  color: var(--ink);
+  font: 13px/1.5 var(--mono);
+  font-feature-settings: "liga" 0, "calt" 0;
+  white-space: pre;
+  tab-size: 4;
+}
+pre.code code { font: inherit; font-variant-ligatures: none; }
+pre.code .c { color: var(--ink2); }
+pre.lined {
+  padding-left: 0;
+  background-image: linear-gradient(90deg, var(--wash) 0 5.5ch, var(--rule) 5.5ch calc(5.5ch + 1px), transparent 0);
+  background-attachment: local;
+}
+pre.lined.g4 {
+  background-image: linear-gradient(90deg, var(--wash) 0 6.5ch, var(--rule) 6.5ch calc(6.5ch + 1px), transparent 0);
+}
+pre.lined .l::before {
+  counter-increment: ln;
+  content: counter(ln);
+  display: inline-block;
+  box-sizing: border-box;
+  width: 5.5ch;
+  padding-right: 1.2ch;
+  margin-right: 1.4ch;
+  text-align: right;
+  color: var(--ink3);
+}
+pre.lined.g4 .l::before { width: 6.5ch; }
+.win.data pre.code {
+  background-image: radial-gradient(var(--rule) 1px, transparent 1.4px);
+  background-size: 9px 9px;
+  background-attachment: local;
+}
+
+figure { margin: 1.6em 0; }
+figure.diagram {
+  margin: 1.9em 0;
+  padding: 20px 18px 14px;
+  background:
+    linear-gradient(var(--ink), var(--ink)) 0 0 / 14px 1.5px no-repeat,
+    linear-gradient(var(--ink), var(--ink)) 0 0 / 1.5px 14px no-repeat,
+    linear-gradient(var(--ink), var(--ink)) 100% 0 / 14px 1.5px no-repeat,
+    linear-gradient(var(--ink), var(--ink)) 100% 0 / 1.5px 14px no-repeat,
+    linear-gradient(var(--ink), var(--ink)) 0 100% / 14px 1.5px no-repeat,
+    linear-gradient(var(--ink), var(--ink)) 0 100% / 1.5px 14px no-repeat,
+    linear-gradient(var(--ink), var(--ink)) 100% 100% / 14px 1.5px no-repeat,
+    linear-gradient(var(--ink), var(--ink)) 100% 100% / 1.5px 14px no-repeat;
+}
+figure.diagram figcaption {
+  margin-top: 12px;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--ink2);
+}
+svg { display: block; width: 100%; height: auto; color: var(--ink); }
+
+.scroll { overflow-x: auto; margin: 1.3em 0 1.7em; }
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 15px;
   line-height: 1.45;
 }
-.nav { font-size: 0.9em; margin-top: 2.2em; }
-dl.walk { margin: 0 0 1.1em; }
-dl.walk dt { margin-top: 0.75em; }
-dl.walk dt code {
-  background: var(--wash);
-  padding: 1px 5px;
-  border-radius: 3px;
+caption {
+  text-align: left;
+  font-size: 14px;
+  color: var(--ink2);
+  padding-bottom: 8px;
 }
-dl.walk dd { margin: 0.15em 0 0 0; }
-ol.quiz > li { margin-bottom: 1.1em; }
-ol.quiz ul { list-style: none; padding: 0; margin: 0; }
-ol.quiz ul li { margin: 0.3em 0; }
-.note {
-  border-top: 1px solid var(--rule);
-  padding: 0.9em 0 0.2em;
+th, td { text-align: left; vertical-align: top; padding: 8px 14px 8px 0; }
+th {
+  font: 400 11.5px/1.35 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink2);
+  vertical-align: bottom;
+  padding-top: 0;
+  border-bottom: 2px solid var(--ink);
 }
-.note:target, .ans:target > p:first-child { background: var(--mark); }
-.back { font-size: 0.9em; }
-.ans {
-  border-top: 1px solid var(--rule);
-  padding-top: 1em;
-  min-height: 100vh;
-  page-break-before: always;
+td { border-bottom: 1px solid var(--rule); }
+td:first-child { min-width: 7.5em; }
+tbody tr:last-child td { border-bottom: 2px solid var(--ink); }
+.n { text-align: right; font-variant-numeric: tabular-nums; }
+td.n { font-family: var(--mono); font-size: 13.5px; }
+
+#toc { margin: 30px 0 0; }
+#toc ol { list-style: none; margin: 0; padding: 6px 16px 10px; }
+#toc ol > li { padding: 9px 0 10px; border-bottom: 1px dotted var(--ink3); }
+#toc ol > li:last-child { border-bottom: 0; }
+#toc ol > li > a {
+  display: flex;
+  align-items: baseline;
+  color: var(--ink);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-decoration: none;
 }
-.meta { font-size: 0.9em; color: var(--ink2); }
+#toc b {
+  flex: none;
+  width: 2.4em;
+  font: 400 14px/1 var(--mono);
+  letter-spacing: 0;
+  color: var(--ink2);
+}
+#toc ul {
+  list-style: none;
+  margin: 3px 0 0;
+  padding: 0 0 0 2.4em;
+  font-size: 15px;
+  line-height: 1.5;
+}
+#toc ul li { margin: 2px 0; }
+
+.status ul { list-style: none; margin: 0; padding: 10px 14px 12px; }
+.status li { margin: 0; }
+.status a {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 0;
+  color: var(--ink);
+  text-decoration: none;
+  font: 14px/1.5 var(--mono);
+}
+.status .k { flex: 1; display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.status .k::after {
+  content: "";
+  flex: 1;
+  min-width: 12px;
+  border-bottom: 1.5px dotted var(--ink3);
+}
+.status .v { flex: none; padding: 0 4px; background: var(--wash); }
+.status a:hover .v, .status a:focus-visible .v { background: var(--yellow); }
+
+.nav {
+  margin-top: 2.6em;
+  padding-top: 12px;
+  border-top: 1.5px dotted var(--ink);
+  font: 14px/1.6 var(--mono);
+}
+dl.walk {
+  margin: 0 0 1.6em;
+  padding-left: 16px;
+  border-left: 2px dotted var(--ink);
+}
+dl.walk dt { margin-top: 0.85em; }
+dl.walk dt:first-child { margin-top: 0; }
+dl.walk dt code { padding: 2px 6px; font-size: 13.5px; }
+dl.walk dd { margin: 0.25em 0 0; }
+
+ol.quiz { list-style: none; margin: 1em 0 0; padding: 0; }
+ol.quiz > li {
+  margin: 0 0 22px;
+  padding: 16px 18px 16px;
+  background: var(--paper);
+  border: 1.5px solid var(--ink);
+  box-shadow: 4px 4px 0 var(--ink);
+}
+ol.quiz > li > p { font-weight: 600; margin-bottom: 0.75em; }
+.qn {
+  font: 400 18px/1 var(--pixel);
+  background: var(--ink);
+  color: var(--paper);
+  padding: 3px 7px 2px;
+  margin-right: 6px;
+  vertical-align: 2px;
+}
+ol.quiz ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+ol.quiz ul a {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1.5px solid var(--ink);
+  background: var(--paper);
+  color: var(--ink);
+  text-decoration: none;
+}
+ol.quiz ul a::before {
+  content: "";
+  flex: none;
+  width: 11px;
+  height: 11px;
+  margin-top: 5px;
+  border: 1.5px solid var(--ink);
+  background: var(--paper);
+}
+ol.quiz ul a:hover, ol.quiz ul a:focus-visible { background: var(--yellow); }
+
+.note { border-top: 1.5px solid var(--ink); padding: 16px 0 6px; }
+.note:target { background: var(--mark); }
+.back { font-size: 15px; }
+.ans { padding-top: 1em; min-height: 100vh; page-break-before: always; }
+.dlg {
+  padding: 18px 20px 14px;
+  background: var(--paper);
+  border: 4px double var(--ink);
+  box-shadow: 4px 4px 0 var(--ink);
+}
+.ans:target .dlg > p:first-child { background: var(--mark); }
+b.ok, b.no { padding: 1px 6px; }
+b.ok { background: var(--yellow); }
+b.no { border: 1.5px solid var(--ink); }
+a.btn {
+  display: inline-block;
+  margin: 8px 6px 4px;
+  padding: 5px 18px;
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  box-shadow: 0 0 0 2px var(--paper), 0 0 0 4.5px var(--ink);
+  color: var(--ink);
+  font-weight: 600;
+  text-decoration: none;
+}
 blockquote {
-  margin: 0 0 1em;
-  padding: 0.2em 0 0.2em 1em;
-  border-left: 3px solid var(--rule);
-  font-size: 0.93em;
+  margin: 1.4em 0;
+  padding: 14px 16px;
+  border: 1.5px dashed var(--ink2);
+  background: var(--wash);
+  font: 13.5px/1.6 var(--mono);
 }
 @media (hover: hover) and (pointer: fine) {
   .ans { display: none; min-height: 0; }
@@ -881,19 +1303,73 @@ blockquote {
 """
 
 
-def css():
-    """Each var() line is preceded by a literal copy for old readers."""
-    tokens = " ".join(f"--{k}: {v};" for k, v in TOKENS.items())
+def fonts():
+    """The four faces as data URIs, so the page needs no font host."""
     out = []
-    for line in CSS.replace("TOKENS", tokens).split("\n"):
-        if "var(--" in line:
+    for family, weight, name, notice in FACES:
+        data = base64.b64encode((FONTS / name).read_bytes()).decode()
+        out.append(
+            f"/* {notice}. SIL Open Font License 1.1. */\n"
+            f'@font-face {{ font-family: "{family}"; font-style: normal; '
+            f"font-weight: {weight}; font-display: swap; "
+            f'src: url(data:font/woff2;base64,{data}) format("woff2"); }}'
+        )
+    return "\n".join(out)
+
+
+def css():
+    """Each one-line var() declaration is preceded by a literal copy for
+    readers without custom properties; a declaration that spans lines is
+    decoration and is left to readers that have them."""
+    tokens = " ".join(f"--{k}: {v};" for k, v in TOKENS.items())
+    ridge = base64.b64encode((IMAGES / "ridge.png").read_bytes()).decode()
+    text = CSS.replace("TOKENS", tokens).replace(
+        "RIDGE", f"data:image/png;base64,{ridge}"
+    )
+    out = []
+    one_line = re.compile(r"^\s*([\w-]+\s*:.*;|[^{}]+\{[^{}]*\})\s*$")
+    for line in text.split("\n"):
+        if "var(--" in line and one_line.match(line):
             out.append(
                 re.sub(
                     r"var\(--(\w+)\)", lambda m: TOKENS[m.group(1)], line
                 )
             )
         out.append(line)
-    return "\n".join(out)
+    return fonts() + "\n" + "\n".join(out)
+
+
+def status():
+    """The measured results in one window, each line linked to its section."""
+    recs = [x for r in R.scen.results for x in r.records]
+    decide = statistics.median([r.records[0].ms.decide for r in R.scen.results
+                  if r.agents == 1]) / 1000
+    rust = cs("intake: Rust binary, static musl (the Lambda artefact)")
+    node = cs("intake: Node, esbuild bundle")
+    rows = [
+        ("fault scenarios passed", f"{R.scen.passed} of {R.scen.total}",
+         "s-results"),
+        ("incidents fixed and verified",
+         f"{sum(1 for x in recs if x.executed and x.recovered)} of "
+         f"{len(recs)}", "s-results"),
+        ("handed to the language model",
+         f"{sum(1 for x in recs if x.escalatedTo == 'reason')} of "
+         f"{len(recs)}", "s-reason-run"),
+        ("handed to a person",
+         f"{sum(1 for x in recs if x.escalatedTo == 'human')} of "
+         f"{len(recs)}", "s-results"),
+        ("decide step, median", f"{decide:.1f} s", "s-latency"),
+        ("cold start, static Rust", f"{rust.p50_ms} ms", "s-intake-cold"),
+        ("cold start, Node bundle", f"{node.p50_ms} ms", "s-intake-cold"),
+        ("1,000 agents, peak memory", f"{sw(1000).rss_peak_mb:,.0f} MB",
+         "s-swarm-memory"),
+    ]
+    items = "".join(
+        f'<li><a href="#{a}"><span class="k">{k}</span> '
+        f'<span class="v">{v}</span></a></li>'
+        for k, v, a in rows
+    )
+    return window("results", f"<ul>{items}</ul>", "bench/results", "status")
 
 
 def main():
@@ -905,13 +1381,21 @@ def main():
     front = inline(FRONT)
     state.update(chapter=None, label="", where="answers")
     page = (
-        f'<main class="page"><header><p class="meta">Tutorial {VERSION}'
-        f"</p><h1>{TITLE}</h1>{front}</header>{toc()}{body}"
+        f'<header class="hero"><div class="hero-in"><div class="hero-text">'
+        f'<p class="kicker"><span class="tag">Tutorial {VERSION}</span></p>'
+        f'<h1>{TITLE}</h1><p class="tagline">{TAGLINE}</p></div>'
+        f'<div class="win bird"><div class="bar"><span class="wt">'
+        f'<span class="opt">Taiwan </span>yellow tit</span></div>'
+        f'<div class="bird-body">{mark()}'
+        f"</div></div></div></header>"
+        f'<main class="page"><div class="bar"><span class="wt">'
+        f'holsti-tutorial.html</span> <span class="wm">{VERSION}</span>'
+        f'</div><div class="doc">{front}{status()}{toc()}{body}'
     )
     page = page.replace("<!--NOTES-->", back).replace(
         "<!--ANSWERS-->", answers()
     )
-    page += "</main>"
+    page += "</div></main>"
     prose = re.sub(r"<pre.*?</pre>", "", page, flags=re.S)
     for pattern in (
         r"<!--NOTES-->",
@@ -952,6 +1436,15 @@ def main():
         f"{len(uses)} notes, {sum(len(q) for _, q in quizzes)} quiz "
         f"questions, about {words} words, {OUT.stat().st_size} bytes"
     )
+
+
+def mark():
+    """The logo's bird, inline, so the page needs no image files."""
+    svg = (ROOT / "docs" / "images" / "holsti-mark.svg").read_text()
+    svg = re.sub(r"\s*<title>.*?</title>", "", svg)
+    # the drawing has room around the bird for the logo; the header crops it
+    svg = svg.replace('viewBox="0 0 512 512"', 'viewBox="56 82 400 400"', 1)
+    return svg.replace("<svg ", '<svg width="150" height="150" ', 1).strip()
 
 
 FRONT = ""
