@@ -29,7 +29,9 @@ tree = """holsti/
   deploy/k8s/              RBAC, decision model, vLLM, agents, network rules
   deploy/docker/           three Dockerfiles
   deploy/sam/              AWS SAM template for the front door
-  scripts/                 numbered: cluster, deploy, inject, run, measure
+  scripts/                 numbered: cluster, deploy, inject, run, measure,
+                           release
+  .github/workflows/       rebuilds this page; builds it for each release
   bench/                   benchmark harnesses and results/
   fixtures/                labelled states for the decision benchmark
   docs/                    this tutorial, its generator, fonts/, images/"""
@@ -39,7 +41,7 @@ for path in ["build.sh", "rust/crates/sift", "rust/crates/intake",
              "rust/crates/vllm-gate", "rust/crates/rusage", "ts/skills",
              "runbooks", "deploy/scenarios", "deploy/k8s", "deploy/docker",
              "deploy/sam", "scripts", "bench/results", "fixtures", "docs",
-             "docs/fonts", "docs/images"] + [
+             "docs/fonts", "docs/images", ".github/workflows"] + [
              f"ts/src/{d}" for d in ["intake", "kube", "mcp", "reflex", "rag",
              "swarm", "reason", "a2a", "mock", "eval", "bench"]]:
     assert (root / path).exists(), path

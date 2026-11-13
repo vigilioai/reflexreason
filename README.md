@@ -28,7 +28,8 @@ The reference implementation is an on-call triage system for a Kubernetes cluste
 ![Measured latency of each step](docs/images/latency.png)
 
 The full explanation, with every listing and every number, is
-`docs/holsti-tutorial.html`.
+`docs/holsti-tutorial.html`. Each [release](../../releases/latest) carries
+the same page built for that version, ready to open in a browser.
 
 ## Quick start (no GPU needed)
 

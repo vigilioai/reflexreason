@@ -1,0 +1,59 @@
+# The tutorial is generated from docs/src, the files its listings quote and
+# bench/results, and the generated page is committed. On every push and
+# pull request this rebuilds the page and fails if the committed copy is
+# stale. On a version tag it builds the release page, labelled with the
+# tag's version and date, and attaches it to the GitHub release of the tag.
+name: tutorial
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    if: github.ref_type != 'tag'
+    # A pinned image keeps the Python that builds the page from changing
+    # under the committed copy.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Rebuild the tutorial
+        run: python3 docs/build_tutorial.py
+      - name: The committed page is the one its sources produce
+        run: |
+          if ! git diff --quiet -- docs/holsti-tutorial.html; then
+            git diff --stat -- docs/holsti-tutorial.html
+            echo "::error file=docs/holsti-tutorial.html::stale: run python3 docs/build_tutorial.py and commit the page"
+            exit 1
+          fi
+
+  release:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # the whole history with its tags, for the date of this tag
+          fetch-depth: 0
+      - name: Build the page for this tag
+        run: python3 docs/build_tutorial.py --release "$GITHUB_REF_NAME"
+      - name: Attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" docs/holsti-tutorial.html --clobber
+          else
+            pre=()
+            if [[ "$TAG" == *-* ]]; then pre=(--prerelease); fi
+            gh release create "$TAG" docs/holsti-tutorial.html \
+              --title "Holsti ${TAG#v}" --generate-notes --verify-tag "${pre[@]}"
+          fi

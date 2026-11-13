@@ -10,6 +10,18 @@ package without this script noticing.
 
     python3 docs/build_tutorial.py                  the standalone file
     python3 docs/build_tutorial.py --page out.html  also a page fragment
+    python3 docs/build_tutorial.py --release v1.0.1 the page of a release
+
+The version is the project's own, read from ts/package.json and checked
+against the Rust workspace. A plain build is labelled with that version
+plus the first eight hex digits of a SHA-256 of the page itself, written as
+SemVer build metadata (1.0.0+3f9a2c1d), so two different pages never carry
+the same label and rebuilding unchanged sources gives a byte-identical file.
+A --release build must name the tag that matches the version; it carries
+the plain version and the date of the tag. The committed page is always a
+plain build: .github/workflows/tutorial.yml rebuilds it on every push and
+fails if it differs, and on a version tag builds the release page and
+attaches it to the GitHub release.
 
 Source syntax, one construct per line start:
 
@@ -27,11 +39,14 @@ Inline: {{expr|format}} for a number, [[term|text]] for a background note,
 """
 
 import base64
+import datetime
+import hashlib
 import html
 import json
 import pathlib
 import re
 import statistics
+import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -42,7 +57,6 @@ FONTS = ROOT / "docs" / "fonts"
 IMAGES = ROOT / "docs" / "images"
 TITLE = "Holsti"
 TAGLINE = "Reflex and reason for 24x7 operations"
-VERSION = "1.0.2"
 MAXCOL = 76
 errors = []
 
@@ -1372,7 +1386,52 @@ def status():
     return window("results", f"<ul>{items}</ul>", "bench/results", "status")
 
 
+def project_version():
+    """The one version of the project. ts/package.json and the Rust
+    workspace both state it, and a release with two versions is an error."""
+    ts = json.loads((ROOT / "ts" / "package.json").read_text())["version"]
+    cargo = (ROOT / "rust" / "Cargo.toml").read_text()
+    table = re.search(r"^\[workspace\.package\]$(.*?)(?=^\[|\Z)", cargo,
+                      re.M | re.S)
+    found = table and re.search(r'^version\s*=\s*"([^"]+)"', table.group(1),
+                                re.M)
+    rust = found.group(1) if found else None
+    if rust != ts:
+        fail(f"ts/package.json says version {ts} but rust/Cargo.toml says "
+             f"{rust}; scripts/80-release.sh sets both")
+    return ts
+
+
+def git(*args):
+    """Output of a git command in the project, or "" outside a checkout."""
+    try:
+        run = subprocess.run(["git", "-C", str(ROOT), *args],
+                             capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return run.stdout.strip() if run.returncode == 0 else ""
+
+
+def release_date(tag):
+    """The date the tag was made, else its commit's, else today (UTC)."""
+    day = git("for-each-ref", "--format=%(creatordate:short)",
+              f"refs/tags/{tag}")
+    if not day:
+        day = git("log", "-1", "--format=%cs", tag)
+    if not day:
+        day = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+        print(f"note: no tag {tag} in this checkout, dated {day}")
+    return day
+
+
 def main():
+    version = project_version()
+    release = None
+    if "--release" in sys.argv:
+        release = sys.argv[sys.argv.index("--release") + 1]
+        if release != f"v{version}":
+            fail(f"tag {release} does not match the project version "
+                 f"{version}; the tag for this version is v{version}")
     sources = read_sources()
     scan(sources)
     body = render(sources)
@@ -1382,14 +1441,14 @@ def main():
     state.update(chapter=None, label="", where="answers")
     page = (
         f'<header class="hero"><div class="hero-in"><div class="hero-text">'
-        f'<p class="kicker"><span class="tag">Tutorial {VERSION}</span></p>'
+        f'<p class="kicker"><span class="tag">{TITLE} @@LABEL@@</span></p>'
         f'<h1>{TITLE}</h1><p class="tagline">{TAGLINE}</p></div>'
         f'<div class="win bird"><div class="bar"><span class="wt">'
         f'<span class="opt">Taiwan </span>yellow tit</span></div>'
         f'<div class="bird-body">{mark()}'
         f"</div></div></div></header>"
         f'<main class="page"><div class="bar"><span class="wt">'
-        f'holsti-tutorial.html</span> <span class="wm">{VERSION}</span>'
+        f'holsti-tutorial.html</span> <span class="wm">@@STAMP@@</span>'
         f'</div><div class="doc">{front}{status()}{toc()}{body}'
     )
     page = page.replace("<!--NOTES-->", back).replace(
@@ -1418,7 +1477,7 @@ def main():
         f'<meta name="claude:viewport-fit-sides" content="cover">\n'
         f"<style>{css()}</style>\n"
     )
-    OUT.write_text(
+    document = (
         '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, '
         'initial-scale=1">\n'
@@ -1427,12 +1486,25 @@ def main():
         + page
         + "\n</body>\n</html>\n"
     )
+    # The label names the content: the hash is taken over the whole file
+    # with the label still a placeholder, so it changes with any change to
+    # text, listings, numbers or style, and with nothing else.
+    digest = hashlib.sha256(document.encode()).hexdigest()[:8]
+    if release:
+        label, stamp = version, f"released {release_date(release)}"
+    else:
+        label, stamp = f"{version}+{digest}", "development build"
+
+    def stamped(text):
+        return text.replace("@@LABEL@@", label).replace("@@STAMP@@", stamp)
+
+    OUT.write_text(stamped(document))
     if "--page" in sys.argv:
         target = pathlib.Path(sys.argv[sys.argv.index("--page") + 1])
-        target.write_text(head + page + "\n")
+        target.write_text(stamped(head + page + "\n"))
     words = len(re.sub(r"<[^>]+>", " ", page).split())
     print(
-        f"{OUT.relative_to(ROOT)}: {len(order)} chapters, "
+        f"{OUT.relative_to(ROOT)}: {TITLE} {label}, {len(order)} chapters, "
         f"{len(uses)} notes, {sum(len(q) for _, q in quizzes)} quiz "
         f"questions, about {words} words, {OUT.stat().st_size} bytes"
     )
