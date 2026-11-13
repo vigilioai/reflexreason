@@ -2,7 +2,14 @@
 # bench/results, and the generated page is committed. On every push and
 # pull request this rebuilds the page and fails if the committed copy is
 # stale. On a version tag it builds the release page, labelled with the
-# tag's version and date, and attaches it to the GitHub release of the tag.
+# tag's version and date, attaches it to the GitHub release of the tag,
+# and publishes it as the home page of the project's GitHub Pages site.
+# Pages needs two settings: Settings, Pages, Source: GitHub Actions; and
+# Settings, Environments, github-pages, a deployment tag rule v*, because
+# that environment accepts only the default branch until told otherwise.
+#
+# Run workflow (from the default branch, with a tag) builds and publishes
+# an existing tag again, from that tag's own files, without moving the tag.
 name: tutorial
 
 on:
@@ -10,13 +17,18 @@ on:
     branches: ["**"]
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing version tag to build and publish, e.g. v1.0.0"
+        required: true
 
 permissions:
   contents: read
 
 jobs:
   check:
-    if: github.ref_type != 'tag'
+    if: github.ref_type != 'tag' && github.event_name != 'workflow_dispatch'
     # A pinned image keeps the Python that builds the page from changing
     # under the committed copy.
     runs-on: ubuntu-24.04
@@ -33,21 +45,24 @@ jobs:
           fi
 
   release:
-    if: github.ref_type == 'tag'
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v6
         with:
-          # the whole history with its tags, for the date of this tag
+          # the tag's own files, and the whole history with its tags, for
+          # the date of the tag
+          ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
       - name: Build the page for this tag
-        run: python3 docs/build_tutorial.py --release "$GITHUB_REF_NAME"
+        run: python3 docs/build_tutorial.py --release "$TAG"
       - name: Attach it to the release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" docs/holsti-tutorial.html --clobber
@@ -57,3 +72,26 @@ jobs:
             gh release create "$TAG" docs/holsti-tutorial.html \
               --title "Holsti ${TAG#v}" --generate-notes --verify-tag "${pre[@]}"
           fi
+      - name: Stage the page as the site's home page
+        run: |
+          mkdir -p _site
+          cp docs/holsti-tutorial.html _site/index.html
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+
+  pages:
+    needs: release
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v5
